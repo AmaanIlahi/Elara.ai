@@ -28,7 +28,10 @@ async def handoff_to_phone(req: VoiceHandoffRequest):
     collected = session.collected_data or {}
     phone_number = collected.get("phone_number") or session.phone_number
     if not phone_number:
-        raise HTTPException(status_code=400, detail="No phone number found in session")
+        raise HTTPException(
+            status_code=400,
+            detail="I need your phone number before I can connect you — please complete the intake first."
+        )
 
     assistant = build_vapi_assistant(session)
 

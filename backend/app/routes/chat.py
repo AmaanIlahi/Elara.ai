@@ -1,22 +1,37 @@
 import asyncio
-from fastapi import APIRouter, HTTPException
-from typing import Optional
+import json
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from typing import AsyncGenerator, Optional
 
-from app.schemas.chat import ChatRequest, ChatResponse
-from app.services.chat_service import detect_workflow, get_workflow_response
+limiter = Limiter(key_func=get_remote_address)
+
+from app.schemas.chat import ChatRequest, ChatResponse, QuickReply
+from app.services.chat_service import detect_workflow, get_workflow_response, get_services_overview
 from app.services.intake_service import (
     build_intake_prompt,
     continue_intake_flow,
     extract_field_value,
     get_missing_intake_field,
+    sanitize_text,
 )
 from app.services.llm_service import LLMService
 from app.services.nlu_service import NLUService
 from app.services.practice_service import answer_practice_question
-from app.services.refill_service import build_refill_response, continue_refill_flow
+from app.data.practice_data import PRACTICE_INFO
+from app.services.refill_service import build_refill_response, continue_refill_flow, submit_refill_request
 from app.services.scheduling_service import (
+    UNSUPPORTED_CONCERN_KEYWORDS,
     build_scheduling_response,
+    build_slot_list_message,
+    build_slot_quick_replies,
     confirm_booking_from_session_data,
+    extract_weekday_preference,
+    filter_slots_by_weekday,
+    format_slot_date,
+    normalize_requested_day,
     parse_relative_slot_preference,
     parse_slot_choice,
     parse_time_choice,
@@ -29,6 +44,32 @@ router = APIRouter(tags=["Chat"])
 nlu_service = NLUService()
 llm_service = LLMService()
 print(f"[STARTUP] LLM Service enabled={llm_service.enabled}, client={llm_service.client is not None}, model={llm_service.model}")
+
+
+def _build_quick_replies(state: str, metadata: dict) -> list:
+    """Return QuickReply objects when the state presents choices to the user."""
+    if state == "SCHEDULING_SHOWING_SLOTS":
+        slots = metadata.get("slots", [])
+        if slots:
+            raw = build_slot_quick_replies(slots)
+            return [QuickReply(**r) for r in raw]
+    if state == "SCHEDULING_CONFIRMING":
+        return [
+            QuickReply(id="confirm_yes", label="Yes, confirm it", value="Yes, please confirm"),
+            QuickReply(id="confirm_no", label="No, pick a different slot", value="No, I'd like a different slot"),
+        ]
+    if state == "REFILL_CONFIRMING":
+        return [
+            QuickReply(id="refill_yes", label="Yes, submit it", value="Yes, please submit"),
+            QuickReply(id="refill_no", label="No, change details", value="No, I need to change the details"),
+        ]
+    if state == "PRACTICE_INFO_DONE":
+        return [
+            QuickReply(id="pi_schedule", label="Schedule an appointment", value="I'd like to schedule an appointment"),
+            QuickReply(id="pi_refill", label="Request a refill", value="I need a prescription refill"),
+            QuickReply(id="pi_more", label="Another question", value="I have another question"),
+        ]
+    return []
 
 
 def _normalize_workflow(workflow_type: Optional[str]) -> Optional[str]:
@@ -63,13 +104,18 @@ def _append_history(session, role: str, content: str):
 
 POLISHABLE_STATES = {
     "PRACTICE_INFO_STARTED",
+    "PRACTICE_INFO_DONE",
     "REFILL_STARTED",
     "REFILL_NEEDS_MEDICATION",
     "REFILL_NEEDS_PHARMACY",
+    "REFILL_CONFIRMING",
+    "REFILL_SUBMITTED",
     "SCHEDULING_STARTED",
-    "SCHEDULING_NEEDS_BODY_PART",
+    # SCHEDULING_NEEDS_BODY_PART intentionally excluded — LLM polish causes an
+    # infinite loop where it rephrases the same question with empathy indefinitely
     "SCHEDULING_UNSUPPORTED_BODY_PART",
     "SCHEDULING_SHOWING_SLOTS",
+    "SCHEDULING_CONFIRMING",
     "SCHEDULING_INVALID_SLOT_CHOICE",
     "COLLECTING_INTAKE",
     "BOOKED",
@@ -149,7 +195,13 @@ async def _maybe_polish_reply(session, assistant_message: str, state: str, workf
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def handle_chat(request: ChatRequest):
+@limiter.limit("20/minute")
+async def handle_chat(body: ChatRequest, request: Request):
+    # Sanitize raw input at the system boundary before any processing
+    request_data = body.model_copy(update={"message": sanitize_text(body.message)})
+    # Rebind to the name the rest of the function uses
+    request = request_data  # type: ignore[assignment]
+
     session = None
 
     if request.session_id:
@@ -246,126 +298,149 @@ async def handle_chat(request: ChatRequest):
                             multi_collected[field_name] = field_value
                             multi_session_updates[field_name] = field_value
 
-                    # Check what's still missing after bulk extraction
-                    next_missing = get_missing_intake_field(
-                        multi_collected,
-                        {**{
-                            "first_name": session.first_name,
-                            "last_name": session.last_name,
-                            "dob": session.dob,
-                            "phone_number": session.phone_number,
-                            "email": session.email,
-                        }, **multi_session_updates},
-                    )
-
-                    if next_missing:
-                        multi_collected["pending_intake_field"] = next_missing
-                        filled_count = len(llm_fields)
-                        if filled_count == 1:
-                            ack_message = f"Thanks! {build_intake_prompt(next_missing)}"
-                        else:
-                            ack_message = f"Got it, I captured {filled_count} details. {build_intake_prompt(next_missing)}"
-
-                        updated_history = list(history)
-                        updated_history.append({"role": "user", "content": request.message})
-                        updated_history.append({"role": "assistant", "content": ack_message})
-                        multi_collected["history"] = updated_history
-                        multi_collected["last_nlu"] = extracted.model_dump()
-
-                        updated_session = update_session(
-                            session.session_id,
-                            {
-                                "last_message": request.message,
-                                "state": "COLLECTING_INTAKE",
-                                "collected_data": multi_collected,
-                                **multi_session_updates,
-                            },
+                        # Check what's still missing after bulk extraction
+                        next_missing = get_missing_intake_field(
+                            multi_collected,
+                            {**{
+                                "first_name": session.first_name,
+                                "last_name": session.last_name,
+                                "dob": session.dob,
+                                "phone_number": session.phone_number,
+                                "email": session.email,
+                            }, **multi_session_updates},
                         )
 
-                        return ChatResponse(
-                            session_id=updated_session.session_id,
-                            workflow_type=updated_session.workflow_type,
-                            state=updated_session.state,
-                            message=ack_message,
-                            next_step=updated_session.state,
-                            metadata={"pending_intake_field": next_missing},
-                        )
-                    else:
-                        # All fields captured via LLM — go straight to booking
-                        multi_collected.pop("pending_intake_field", None)
-                        multi_collected["last_nlu"] = extracted.model_dump()
-                        selected_slot = multi_collected.get("selected_slot")
-
-                        updated_session = update_session(
-                            session.session_id,
-                            {
-                                "collected_data": multi_collected,
-                                **multi_session_updates,
-                            },
-                        )
-
-                        if selected_slot is not None:
-                            booking_success, booking_result = confirm_booking_from_session_data(
-                                multi_collected, selected_slot,
-                            )
-                            booking_metadata = booking_result.get("metadata", {})
-                            multi_collected.update(booking_metadata)
+                        if next_missing:
+                            multi_collected["pending_intake_field"] = next_missing
+                            filled_count = len(llm_fields)
+                            if filled_count == 1:
+                                ack_message = f"Thanks! {build_intake_prompt(next_missing)}"
+                            else:
+                                ack_message = f"Perfect, got those! {build_intake_prompt(next_missing)}"
 
                             updated_history = list(history)
                             updated_history.append({"role": "user", "content": request.message})
-                            updated_history.append({"role": "assistant", "content": booking_result["message"]})
+                            updated_history.append({"role": "assistant", "content": ack_message})
+                            multi_collected["history"] = updated_history
+                            multi_collected["last_nlu"] = extracted.model_dump()
+
+                            updated_session = update_session(
+                                session.session_id,
+                                {
+                                    "last_message": request.message,
+                                    "state": "COLLECTING_INTAKE",
+                                    "collected_data": multi_collected,
+                                    **multi_session_updates,
+                                },
+                            )
+
+                            return ChatResponse(
+                                session_id=updated_session.session_id,
+                                workflow_type=updated_session.workflow_type,
+                                state=updated_session.state,
+                                message=ack_message,
+                                next_step=updated_session.state,
+                                metadata={"pending_intake_field": next_missing},
+                            )
+                        else:
+                            # All fields captured via LLM — show slots or ask for confirmation
+                            multi_collected.pop("pending_intake_field", None)
+                            multi_collected["last_nlu"] = extracted.model_dump()
+                            selected_slot = multi_collected.get("selected_slot")
+
+                            updated_session = update_session(
+                                session.session_id,
+                                {
+                                    "collected_data": multi_collected,
+                                    **multi_session_updates,
+                                },
+                            )
+
+                            if selected_slot is not None:
+                                # Don't auto-book — ask for confirmation
+                                slots = multi_collected.get("slots", [])
+                                if slots and 1 <= selected_slot <= len(slots):
+                                    pending_slot_obj = slots[selected_slot - 1]
+                                    slot_label = format_slot_date(pending_slot_obj["date"], pending_slot_obj["time"])
+                                    provider_name_c = multi_collected.get("provider_name", "")
+                                    specialty_c = multi_collected.get("specialty", "")
+                                    body_part_c = multi_collected.get("body_part", "")
+                                    confirm_msg = (
+                                        f"Great news — I have everything I need! Just to confirm, "
+                                        f"you'd like to book an appointment with {provider_name_c} ({specialty_c}) "
+                                        f"for your {body_part_c} on {slot_label}. Shall I go ahead and confirm this?"
+                                    )
+                                    multi_collected["pending_slot_choice"] = selected_slot
+                                    multi_collected.pop("selected_slot", None)
+
+                                    updated_history = list(history)
+                                    updated_history.append({"role": "user", "content": request.message})
+                                    updated_history.append({"role": "assistant", "content": confirm_msg})
+                                    multi_collected["history"] = updated_history
+
+                                    final_session = update_session(
+                                        updated_session.session_id,
+                                        {
+                                            "last_message": request.message,
+                                            "state": "SCHEDULING_CONFIRMING",
+                                            "collected_data": multi_collected,
+                                        },
+                                    )
+
+                                    return ChatResponse(
+                                        session_id=final_session.session_id,
+                                        workflow_type=final_session.workflow_type,
+                                        state=final_session.state,
+                                        message=confirm_msg,
+                                        next_step=final_session.state,
+                                        metadata={},
+                                        quick_replies=_build_quick_replies("SCHEDULING_CONFIRMING", {}),
+                                    )
+
+                            # No slot selected yet — show slots immediately
+                            stored_slots = multi_collected.get("slots", [])
+                            body_part_val = multi_collected.get("body_part", "")
+                            provider_name_val = multi_collected.get("provider_name", "")
+                            specialty_val = multi_collected.get("specialty", "")
+                            display_slots = stored_slots[:5]
+                            intro = (
+                                f"Great, I have all your information! Here are the available slots with "
+                                f"{provider_name_val} ({specialty_val}) for your {body_part_val} concern."
+                            )
+                            slot_msg = build_slot_list_message(
+                                provider_name_val, specialty_val, body_part_val, display_slots, intro=intro
+                            )
+                            slot_metadata = {
+                                "slots": display_slots,
+                                "provider_name": provider_name_val,
+                                "specialty": specialty_val,
+                                "body_part": body_part_val,
+                            }
+                            multi_collected.update(slot_metadata)
+
+                            updated_history = list(history)
+                            updated_history.append({"role": "user", "content": request.message})
+                            updated_history.append({"role": "assistant", "content": slot_msg})
                             multi_collected["history"] = updated_history
 
                             final_session = update_session(
                                 updated_session.session_id,
                                 {
                                     "last_message": request.message,
-                                    "state": booking_result["state"],
-                                    "status": "completed" if booking_success else updated_session.status,
+                                    "state": "SCHEDULING_SHOWING_SLOTS",
                                     "collected_data": multi_collected,
-                                    **multi_session_updates,
                                 },
                             )
-
-                            final_msg = await _maybe_polish_reply(
-                                final_session, booking_result["message"],
-                                booking_result["state"], final_session.workflow_type, booking_metadata,
-                            )
-                            final_msg = await _maybe_append_booking_guidance(final_msg, booking_metadata)
 
                             return ChatResponse(
                                 session_id=final_session.session_id,
                                 workflow_type=final_session.workflow_type,
                                 state=final_session.state,
-                                message=final_msg,
+                                message=slot_msg,
                                 next_step=final_session.state,
-                                metadata=booking_metadata,
+                                metadata=slot_metadata,
+                                quick_replies=_build_quick_replies("SCHEDULING_SHOWING_SLOTS", slot_metadata),
                             )
-
-                        # No slot selected yet, acknowledge and continue
-                        ack = f"Got it, I captured all your details. Thank you!"
-                        updated_history = list(history)
-                        updated_history.append({"role": "user", "content": request.message})
-                        updated_history.append({"role": "assistant", "content": ack})
-                        multi_collected["history"] = updated_history
-
-                        final_session = update_session(
-                            updated_session.session_id,
-                            {
-                                "last_message": request.message,
-                                "state": "INTAKE_COMPLETE",
-                                "collected_data": multi_collected,
-                            },
-                        )
-
-                        return ChatResponse(
-                            session_id=final_session.session_id,
-                            workflow_type=final_session.workflow_type,
-                            state=final_session.state,
-                            message=ack,
-                            next_step=final_session.state,
-                            metadata={},
-                        )
 
             except Exception as e:
                 print(f"LLM multi-field extraction failed: {e}")
@@ -391,68 +466,85 @@ async def handle_chat(request: ChatRequest):
             selected_slot = updated_collected_data.get("selected_slot")
 
             if selected_slot is not None:
-                booking_success, booking_result = confirm_booking_from_session_data(
-                    updated_collected_data,
-                    selected_slot,
-                )
-
-                booking_metadata = booking_result.get("metadata", {})
-                updated_collected_data.update(booking_metadata)
+                # Don't auto-book — ask for confirmation first
+                slots = updated_collected_data.get("slots", [])
                 updated_collected_data.pop("pending_intake_field", None)
+                updated_collected_data.update(intake_result.get("session_updates", {}))
 
-                updated_history = list(history)
-                updated_history.append({"role": "user", "content": request.message})
-                updated_history.append({"role": "assistant", "content": booking_result["message"]})
-                updated_collected_data["history"] = updated_history
+                if slots and 1 <= selected_slot <= len(slots):
+                    pending_slot_obj = slots[selected_slot - 1]
+                    slot_label = format_slot_date(pending_slot_obj["date"], pending_slot_obj["time"])
+                    provider_name_c = updated_collected_data.get("provider_name", "")
+                    specialty_c = updated_collected_data.get("specialty", "")
+                    body_part_c = updated_collected_data.get("body_part", "")
 
-                updated_session_payload = {
-                    "last_message": request.message,
-                    "workflow_type": session.workflow_type,
-                    "state": booking_result["state"],
-                    "status": "completed" if booking_success else session.status,
-                    "collected_data": updated_collected_data,
-                }
-                updated_session_payload.update(intake_result.get("session_updates", {}))
+                    confirm_msg = (
+                        f"Great, I have all your details! Just to confirm — you'd like to book "
+                        f"an appointment with {provider_name_c} ({specialty_c}) for your {body_part_c} "
+                        f"on {slot_label}. Shall I go ahead and confirm this?"
+                    )
+                    updated_collected_data["pending_slot_choice"] = selected_slot
+                    updated_collected_data.pop("selected_slot", None)
 
-                updated_session = update_session(session.session_id, updated_session_payload)
+                    updated_history = list(history)
+                    updated_history.append({"role": "user", "content": request.message})
+                    updated_history.append({"role": "assistant", "content": confirm_msg})
+                    updated_collected_data["history"] = updated_history
 
-                final_message = await _maybe_polish_reply(
-                    updated_session,
-                    booking_result["message"],
-                    booking_result["state"],
-                    updated_session.workflow_type,
-                    booking_metadata,
-                )
-                final_message = await _maybe_append_booking_guidance(final_message, booking_metadata)
+                    updated_session_payload = {
+                        "last_message": request.message,
+                        "workflow_type": session.workflow_type,
+                        "state": "SCHEDULING_CONFIRMING",
+                        "collected_data": updated_collected_data,
+                    }
+                    updated_session_payload.update(intake_result.get("session_updates", {}))
+                    updated_session = update_session(session.session_id, updated_session_payload)
 
-                updated_collected_data = dict(updated_session.collected_data)
-                history_after = updated_collected_data.get("history", [])
-                if history_after and history_after[-1]["role"] == "assistant":
-                    history_after[-1]["content"] = final_message
-                    updated_collected_data["history"] = history_after
-                    updated_session = update_session(
-                        updated_session.session_id,
-                        {"collected_data": updated_collected_data},
+                    return ChatResponse(
+                        session_id=updated_session.session_id,
+                        workflow_type=updated_session.workflow_type,
+                        state=updated_session.state,
+                        message=confirm_msg,
+                        next_step=updated_session.state,
+                        metadata={},
+                        quick_replies=_build_quick_replies("SCHEDULING_CONFIRMING", {}),
                     )
 
-                return ChatResponse(
-                    session_id=updated_session.session_id,
-                    workflow_type=updated_session.workflow_type,
-                    state=updated_session.state,
-                    message=final_message,
-                    next_step=updated_session.state,
-                    metadata=booking_metadata,
+        # When intake completes in a scheduling flow, show stored slots instead of the generic ack
+        resp_message = intake_result["message"]
+        resp_state = intake_result["state"]
+        resp_metadata = intake_result.get("metadata", {})
+
+        if intake_result["state"] == "INTAKE_COMPLETE" and session.workflow_type == "scheduling":
+            stored_slots = updated_collected_data.get("slots", [])
+            if stored_slots:
+                body_part_val = updated_collected_data.get("body_part", "")
+                provider_name_val = updated_collected_data.get("provider_name", "")
+                specialty_val = updated_collected_data.get("specialty", "")
+                display_slots = stored_slots[:5]
+                intro = (
+                    f"Great, I have all your information! Here are the available slots with "
+                    f"{provider_name_val} ({specialty_val}) for your {body_part_val} concern."
                 )
+                resp_message = build_slot_list_message(provider_name_val, specialty_val, body_part_val, display_slots, intro=intro)
+                resp_state = "SCHEDULING_SHOWING_SLOTS"
+                resp_metadata = {
+                    "slots": display_slots,
+                    "provider_name": provider_name_val,
+                    "specialty": specialty_val,
+                    "body_part": body_part_val,
+                }
+                updated_collected_data.update(resp_metadata)
 
         updated_history = list(history)
         updated_history.append({"role": "user", "content": request.message})
-        updated_history.append({"role": "assistant", "content": intake_result["message"]})
+        updated_history.append({"role": "assistant", "content": resp_message})
 
         updated_collected_data["history"] = updated_history
 
         updated_session_payload = {
             "last_message": request.message,
-            "state": intake_result["state"],
+            "state": resp_state,
             "collected_data": updated_collected_data,
         }
         updated_session_payload.update(intake_result.get("session_updates", {}))
@@ -461,10 +553,10 @@ async def handle_chat(request: ChatRequest):
 
         final_message = await _maybe_polish_reply(
             updated_session,
-            intake_result["message"],
-            intake_result["state"],
+            resp_message,
+            resp_state,
             updated_session.workflow_type,
-            intake_result.get("metadata", {}),
+            resp_metadata,
         )
 
         updated_collected_data = dict(updated_session.collected_data)
@@ -484,7 +576,8 @@ async def handle_chat(request: ChatRequest):
             state=updated_session.state,
             message=final_message,
             next_step=updated_session.state,
-            metadata=intake_result.get("metadata", {}),
+            metadata=resp_metadata,
+            quick_replies=_build_quick_replies(resp_state, resp_metadata),
         )
 
     # Always re-evaluate intent — the user may switch workflows mid-conversation
@@ -521,8 +614,8 @@ async def handle_chat(request: ChatRequest):
     if extracted.requested_time_pref and not prefill_collected_data.get("requested_time_pref"):
         prefill_collected_data["requested_time_pref"] = extracted.requested_time_pref
 
-    if extracted.refill_medication and not prefill_collected_data.get("medication"):
-        prefill_collected_data["medication"] = extracted.refill_medication
+    if extracted.refill_medication and not prefill_collected_data.get("medication_name"):
+        prefill_collected_data["medication_name"] = extracted.refill_medication
 
     if prefill_collected_data != dict(session.collected_data):
         session = update_session(
@@ -530,8 +623,12 @@ async def handle_chat(request: ChatRequest):
             {"collected_data": prefill_collected_data},
         )
 
-    if workflow_type == "practice_info":
-        state = "PRACTICE_INFO_STARTED"
+    if workflow_type == "services":
+        state = "PRACTICE_INFO_DONE"
+        assistant_message = get_services_overview()
+
+    elif workflow_type == "practice_info":
+        state = "PRACTICE_INFO_DONE"
         practice_question = request.message
 
         if extracted.practice_info_topic and extracted.practice_info_topic != "general":
@@ -540,6 +637,115 @@ async def handle_chat(request: ChatRequest):
         assistant_message = answer_practice_question(practice_question)
 
     elif workflow_type == "scheduling":
+        if session.state == "SCHEDULING_CONFIRMING":
+            msg_lower = request.message.lower().strip()
+            confirmed = any(w in msg_lower for w in ["yes", "yeah", "confirm", "go ahead", "sure", "ok", "correct", "book", "please"])
+            declined = any(w in msg_lower for w in ["no", "nope", "cancel", "change", "different", "back", "another"])
+
+            if confirmed:
+                pending_slot_choice = session.collected_data.get("pending_slot_choice")
+                if pending_slot_choice is not None:
+                    booking_success, booking_result = confirm_booking_from_session_data(
+                        session.collected_data, pending_slot_choice
+                    )
+                    booking_metadata = booking_result.get("metadata", {})
+                    updated_collected_data = dict(session.collected_data)
+                    updated_collected_data.update(booking_metadata)
+                    updated_collected_data.pop("pending_slot_choice", None)
+                    updated_collected_data["last_nlu"] = extracted.model_dump()
+
+                    updated_history = list(_get_conversation_history(session))
+                    updated_history.append({"role": "user", "content": request.message})
+                    updated_history.append({"role": "assistant", "content": booking_result["message"]})
+                    updated_collected_data["history"] = updated_history
+
+                    updated_session = update_session(
+                        session.session_id,
+                        {
+                            "last_message": request.message,
+                            "workflow_type": workflow_type,
+                            "state": booking_result["state"],
+                            "status": "completed" if booking_success else session.status,
+                            "collected_data": updated_collected_data,
+                        },
+                    )
+
+                    final_message = await _maybe_polish_reply(
+                        updated_session, booking_result["message"],
+                        booking_result["state"], workflow_type, booking_metadata,
+                    )
+                    final_message = await _maybe_append_booking_guidance(final_message, booking_metadata)
+
+                    updated_collected_data = dict(updated_session.collected_data)
+                    history_after = updated_collected_data.get("history", [])
+                    if history_after and history_after[-1]["role"] == "assistant":
+                        history_after[-1]["content"] = final_message
+                        updated_collected_data["history"] = history_after
+                        updated_session = update_session(
+                            updated_session.session_id, {"collected_data": updated_collected_data}
+                        )
+
+                    return ChatResponse(
+                        session_id=updated_session.session_id,
+                        workflow_type=updated_session.workflow_type,
+                        state=updated_session.state,
+                        message=final_message,
+                        next_step=updated_session.state,
+                        metadata=booking_metadata,
+                    )
+
+            if declined:
+                # Re-show the stored slots
+                stored_slots = session.collected_data.get("slots", [])
+                body_part_val = session.collected_data.get("body_part", "")
+                provider_name_val = session.collected_data.get("provider_name", "")
+                specialty_val = session.collected_data.get("specialty", "")
+                intro = f"No problem! Here are the available slots again — take your time:"
+                slot_msg = build_slot_list_message(provider_name_val, specialty_val, body_part_val, stored_slots[:5], intro=intro)
+                slot_meta = {"slots": stored_slots[:5], "provider_name": provider_name_val, "specialty": specialty_val, "body_part": body_part_val}
+
+                updated_collected_data = dict(session.collected_data)
+                updated_collected_data.pop("pending_slot_choice", None)
+                updated_collected_data.update(slot_meta)
+                updated_collected_data["last_nlu"] = extracted.model_dump()
+                updated_history = list(_get_conversation_history(session))
+                updated_history.append({"role": "user", "content": request.message})
+                updated_history.append({"role": "assistant", "content": slot_msg})
+                updated_collected_data["history"] = updated_history
+
+                updated_session = update_session(
+                    session.session_id,
+                    {"last_message": request.message, "workflow_type": workflow_type, "state": "SCHEDULING_SHOWING_SLOTS", "collected_data": updated_collected_data},
+                )
+
+                return ChatResponse(
+                    session_id=updated_session.session_id,
+                    workflow_type=updated_session.workflow_type,
+                    state=updated_session.state,
+                    message=slot_msg,
+                    next_step=updated_session.state,
+                    metadata=slot_meta,
+                    quick_replies=_build_quick_replies("SCHEDULING_SHOWING_SLOTS", slot_meta),
+                )
+
+            # Ambiguous — ask again
+            pending_slot_choice = session.collected_data.get("pending_slot_choice")
+            slots = session.collected_data.get("slots", [])
+            slot_label = ""
+            if pending_slot_choice and slots and 1 <= pending_slot_choice <= len(slots):
+                s = slots[pending_slot_choice - 1]
+                slot_label = format_slot_date(s["date"], s["time"])
+            re_ask = f"Just to check — shall I go ahead and confirm your appointment for {slot_label}? Tap Yes to confirm or No to pick a different slot."
+            return ChatResponse(
+                session_id=session.session_id,
+                workflow_type=session.workflow_type,
+                state=session.state,
+                message=re_ask,
+                next_step=session.state,
+                metadata={},
+                quick_replies=_build_quick_replies("SCHEDULING_CONFIRMING", {}),
+            )
+
         if session.state == "SCHEDULING_SHOWING_SLOTS":
             slots = session.collected_data.get("slots", [])
             provider_name = session.collected_data.get("provider_name", "")
@@ -594,6 +800,7 @@ async def handle_chat(request: ChatRequest):
                         message=preference_result["message"],
                         next_step=updated_session.state,
                         metadata=preference_metadata,
+                        quick_replies=_build_quick_replies(preference_result["state"], preference_metadata),
                     )
 
                 # If the user asked a question mid-flow (not a slot choice),
@@ -628,6 +835,7 @@ async def handle_chat(request: ChatRequest):
                                 message=mid_flow_message,
                                 next_step=updated_session.state,
                                 metadata={"slots": slots},
+                                quick_replies=_build_quick_replies(updated_session.state, {"slots": slots}),
                             )
                     except Exception as e:
                         print(f"LLM mid-flow reply failed: {e}")
@@ -636,9 +844,10 @@ async def handle_chat(request: ChatRequest):
                     session_id=session.session_id,
                     workflow_type=session.workflow_type,
                     state=session.state,
-                    message="Please choose one of the available slots by number, time, or preference like 'early one'.",
+                    message="Just pick one of the slots above — tap a button or type the number.",
                     next_step=session.state,
                     metadata={"slots": slots},
+                    quick_replies=_build_quick_replies(session.state, {"slots": slots}),
                 )
 
             missing_field = get_missing_intake_field(
@@ -702,21 +911,38 @@ async def handle_chat(request: ChatRequest):
                     metadata={"pending_intake_field": missing_field},
                 )
 
-            success, result = confirm_booking_from_session_data(
-                session.collected_data,
-                slot_choice,
+            # Validate slot index before asking for confirmation
+            all_slots = session.collected_data.get("slots", [])
+            if not all_slots or slot_choice < 1 or slot_choice > len(all_slots):
+                return ChatResponse(
+                    session_id=session.session_id,
+                    workflow_type=session.workflow_type,
+                    state=session.state,
+                    message=f"I didn't quite catch that — please pick a slot between 1 and {len(all_slots)}.",
+                    next_step=session.state,
+                    metadata={"slots": all_slots},
+                    quick_replies=_build_quick_replies("SCHEDULING_SHOWING_SLOTS", {"slots": all_slots}),
+                )
+
+            pending_slot_obj = all_slots[slot_choice - 1]
+            slot_label = format_slot_date(pending_slot_obj["date"], pending_slot_obj["time"])
+            provider_name_c = session.collected_data.get("provider_name", "")
+            specialty_c = session.collected_data.get("specialty", "")
+            body_part_c = session.collected_data.get("body_part", "")
+
+            confirm_msg = (
+                f"Great choice! Just to confirm — you'd like to book an appointment with "
+                f"{provider_name_c} ({specialty_c}) for your {body_part_c} on {slot_label}. "
+                f"Shall I go ahead and confirm this?"
             )
-            state = result["state"]
-            assistant_message = result["message"]
-            metadata = result["metadata"]
 
             updated_collected_data = dict(session.collected_data)
-            updated_collected_data.update(metadata)
+            updated_collected_data["pending_slot_choice"] = slot_choice
             updated_collected_data["last_nlu"] = extracted.model_dump()
 
             updated_history = list(_get_conversation_history(session))
             updated_history.append({"role": "user", "content": request.message})
-            updated_history.append({"role": "assistant", "content": assistant_message})
+            updated_history.append({"role": "assistant", "content": confirm_msg})
             updated_collected_data["history"] = updated_history
 
             updated_session = update_session(
@@ -724,38 +950,75 @@ async def handle_chat(request: ChatRequest):
                 {
                     "last_message": request.message,
                     "workflow_type": workflow_type,
-                    "state": state,
-                    "status": "completed" if success else session.status,
+                    "state": "SCHEDULING_CONFIRMING",
                     "collected_data": updated_collected_data,
                 },
             )
-
-            final_message = await _maybe_polish_reply(
-                updated_session,
-                assistant_message,
-                state,
-                workflow_type,
-                metadata,
-            )
-            final_message = await _maybe_append_booking_guidance(final_message, metadata)
-
-            updated_collected_data = dict(updated_session.collected_data)
-            history_after = updated_collected_data.get("history", [])
-            if history_after and history_after[-1]["role"] == "assistant":
-                history_after[-1]["content"] = final_message
-                updated_collected_data["history"] = history_after
-                updated_session = update_session(
-                    updated_session.session_id,
-                    {"collected_data": updated_collected_data},
-                )
 
             return ChatResponse(
                 session_id=updated_session.session_id,
                 workflow_type=updated_session.workflow_type,
                 state=updated_session.state,
-                message=final_message,
+                message=confirm_msg,
                 next_step=updated_session.state,
-                metadata=metadata,
+                metadata={},
+                quick_replies=_build_quick_replies("SCHEDULING_CONFIRMING", {}),
+            )
+
+        # If intake is done but slots haven't been shown yet, show them now
+        if session.state == "INTAKE_COMPLETE" and session.collected_data.get("slots"):
+            stored_slots = session.collected_data.get("slots", [])
+            body_part_val = session.collected_data.get("body_part", "")
+            provider_name_val = session.collected_data.get("provider_name", "")
+            specialty_val = session.collected_data.get("specialty", "")
+
+            weekday = extract_weekday_preference(request.message) or normalize_requested_day(extracted.requested_day)
+            display_slots = stored_slots
+            if weekday:
+                filtered = filter_slots_by_weekday(stored_slots, weekday)
+                if filtered:
+                    display_slots = filtered
+            display_slots = display_slots[:5]
+
+            intro = (
+                f"Here are the available slots with {provider_name_val} ({specialty_val}) "
+                f"for your {body_part_val} concern."
+            )
+            slot_message = build_slot_list_message(provider_name_val, specialty_val, body_part_val, display_slots, intro=intro)
+            slot_metadata = {
+                "slots": display_slots,
+                "provider_name": provider_name_val,
+                "specialty": specialty_val,
+                "body_part": body_part_val,
+            }
+
+            updated_collected_data = dict(session.collected_data)
+            updated_collected_data.update(slot_metadata)
+            updated_collected_data["last_nlu"] = extracted.model_dump()
+
+            updated_history = list(_get_conversation_history(session))
+            updated_history.append({"role": "user", "content": request.message})
+            updated_history.append({"role": "assistant", "content": slot_message})
+            updated_collected_data["history"] = updated_history
+
+            updated_session = update_session(
+                session.session_id,
+                {
+                    "last_message": request.message,
+                    "workflow_type": workflow_type,
+                    "state": "SCHEDULING_SHOWING_SLOTS",
+                    "collected_data": updated_collected_data,
+                },
+            )
+
+            return ChatResponse(
+                session_id=updated_session.session_id,
+                workflow_type=updated_session.workflow_type,
+                state=updated_session.state,
+                message=slot_message,
+                next_step=updated_session.state,
+                metadata=slot_metadata,
+                quick_replies=_build_quick_replies("SCHEDULING_SHOWING_SLOTS", slot_metadata),
             )
 
         scheduling_input = request.message
@@ -779,28 +1042,206 @@ async def handle_chat(request: ChatRequest):
         assistant_message = scheduling_result["message"]
         metadata = scheduling_result["metadata"]
 
+        # If the NLU extracted a specific body_part that isn't in any provider's list,
+        # treat it as unsupported rather than looping with the same "what's your concern?" question.
+        # Only trigger on body_part (not reason) — reason is set to the full message by fallback NLU
+        # and would fire even on generic scheduling phrases like "I'd like an appointment".
+        if state == "SCHEDULING_NEEDS_BODY_PART" and extracted.body_part:
+            body_part_lower = extracted.body_part.lower()
+            is_known_unsupported = any(
+                kw in body_part_lower for kw in UNSUPPORTED_CONCERN_KEYWORDS
+            )
+            if is_known_unsupported:
+                described = extracted.body_part
+                state = "SCHEDULING_UNSUPPORTED_BODY_PART"
+                assistant_message = (
+                    f"I'm sorry to hear you're dealing with that. Unfortunately we don't currently "
+                    f"have a specialist for {described} through this system. "
+                    f"Please give the office a call at {PRACTICE_INFO['phone']} "
+                    f"and they'll make sure you get the right care. Is there anything else I can help with?"
+                )
+                metadata = {"unsupported_concern": described}
+            # If body_part was extracted but isn't a known unsupported term, it's likely
+            # something the provider list simply doesn't cover yet — ask normally.
+
+        # If provider was found, collect intake BEFORE showing slots
+        if state == "SCHEDULING_SHOWING_SLOTS":
+            session_dict_check = {
+                "first_name": session.first_name,
+                "last_name": session.last_name,
+                "dob": session.dob,
+                "phone_number": session.phone_number,
+                "email": session.email,
+            }
+            missing_field = get_missing_intake_field(prefill_collected_data, session_dict_check)
+            if missing_field:
+                provider_name_val = metadata.get("provider_name", "")
+                specialty_val = metadata.get("specialty", "")
+                body_part_val = metadata.get("body_part", "")
+                intake_prompt = build_intake_prompt(missing_field)
+                assistant_message = (
+                    f"I'm sorry to hear about your {body_part_val} — I'll make sure we get you seen quickly. "
+                    f"I found availability with {provider_name_val} ({specialty_val}). "
+                    f"Before I pull up the slots, I just need a few quick details.\n\n{intake_prompt}"
+                )
+                state = "COLLECTING_INTAKE"
+                metadata = {
+                    **metadata,
+                    "pending_intake_field": missing_field,
+                }
+
     elif workflow_type == "refill":
-        refill_input = request.message
+        if session.state == "REFILL_CONFIRMING":
+            msg_lower = request.message.lower().strip()
+            confirmed = any(w in msg_lower for w in ["yes", "yeah", "confirm", "go ahead", "sure", "ok", "submit", "please", "correct"])
+            declined = any(w in msg_lower for w in ["no", "nope", "cancel", "change", "different", "back", "update"])
 
-        if extracted.refill_medication and not session.collected_data.get("medication"):
-            refill_input = f"{request.message}\nmedication: {extracted.refill_medication}"
+            med_name = session.collected_data.get("medication_name", "")
+            pharm_name = session.collected_data.get("pharmacy_name", "")
 
-        if session.state in ["REFILL_NEEDS_MEDICATION", "REFILL_NEEDS_PHARMACY"]:
-            refill_result = continue_refill_flow(refill_input, session.collected_data)
+            if confirmed:
+                refill_record = submit_refill_request(
+                    session_id=session.session_id,
+                    medication_name=med_name,
+                    pharmacy_name=pharm_name,
+                )
+                state = "REFILL_SUBMITTED"
+                assistant_message = (
+                    f"Your refill request for **{med_name}** has been sent to **{pharm_name}**. "
+                    f"The pharmacy typically processes requests within 24–48 hours. "
+                    f"Is there anything else I can help you with?"
+                )
+                metadata = {
+                    "medication_name": med_name,
+                    "pharmacy_name": pharm_name,
+                    "refill_request_id": refill_record.get("refill_request_id"),
+                    "refill_submitted": True,
+                }
+
+                updated_collected_data = dict(session.collected_data)
+                updated_collected_data.update(metadata)
+                updated_collected_data["last_nlu"] = extracted.model_dump()
+                updated_history = list(_get_conversation_history(session))
+                updated_history.append({"role": "user", "content": request.message})
+                updated_history.append({"role": "assistant", "content": assistant_message})
+                updated_collected_data["history"] = updated_history
+
+                updated_session = update_session(
+                    session.session_id,
+                    {
+                        "last_message": request.message,
+                        "workflow_type": workflow_type,
+                        "state": state,
+                        "status": "completed",
+                        "collected_data": updated_collected_data,
+                    },
+                )
+
+                final_message = await _maybe_polish_reply(
+                    updated_session, assistant_message, state, workflow_type, metadata,
+                )
+
+                updated_collected_data = dict(updated_session.collected_data)
+                history_after = updated_collected_data.get("history", [])
+                if history_after and history_after[-1]["role"] == "assistant":
+                    history_after[-1]["content"] = final_message
+                    updated_collected_data["history"] = history_after
+                    updated_session = update_session(
+                        updated_session.session_id, {"collected_data": updated_collected_data}
+                    )
+
+                return ChatResponse(
+                    session_id=updated_session.session_id,
+                    workflow_type=updated_session.workflow_type,
+                    state=updated_session.state,
+                    message=final_message,
+                    next_step=updated_session.state,
+                    metadata=metadata,
+                    quick_replies=_build_quick_replies("PRACTICE_INFO_DONE", {}),
+                )
+
+            if declined:
+                # Reset pharmacy so user can re-enter details
+                updated_collected_data = dict(session.collected_data)
+                updated_collected_data.pop("pharmacy_name", None)
+                update_session(session.session_id, {
+                    "state": "REFILL_NEEDS_PHARMACY",
+                    "collected_data": updated_collected_data,
+                })
+                state = "REFILL_NEEDS_PHARMACY"
+                assistant_message = f"No problem! Which pharmacy would you like your {med_name} refill sent to?"
+                metadata = {"medication_name": med_name}
+            else:
+                # Ambiguous — re-ask
+                state = "REFILL_CONFIRMING"
+                assistant_message = (
+                    f"Just to check — shall I go ahead and submit a refill for **{med_name}** "
+                    f"to **{pharm_name}**?"
+                )
+                metadata = {"medication_name": med_name, "pharmacy_name": pharm_name}
+
+                updated_collected_data = dict(session.collected_data)
+                updated_collected_data["last_nlu"] = extracted.model_dump()
+                updated_history = list(_get_conversation_history(session))
+                updated_history.append({"role": "user", "content": request.message})
+                updated_history.append({"role": "assistant", "content": assistant_message})
+                updated_collected_data["history"] = updated_history
+                updated_session = update_session(
+                    session.session_id,
+                    {"last_message": request.message, "collected_data": updated_collected_data},
+                )
+                return ChatResponse(
+                    session_id=updated_session.session_id,
+                    workflow_type=updated_session.workflow_type,
+                    state=updated_session.state,
+                    message=assistant_message,
+                    next_step=updated_session.state,
+                    metadata=metadata,
+                    quick_replies=_build_quick_replies("REFILL_CONFIRMING", {}),
+                )
+
         else:
-            refill_result = build_refill_response(refill_input)
+            refill_input = request.message
 
-        state = refill_result["state"]
-        assistant_message = refill_result["message"]
-        metadata = refill_result["metadata"]
+            if extracted.refill_medication and not session.collected_data.get("medication_name"):
+                refill_input = f"{request.message}\nmedication: {extracted.refill_medication}"
+
+            if session.state in ["REFILL_NEEDS_MEDICATION", "REFILL_NEEDS_PHARMACY"]:
+                refill_result = continue_refill_flow(refill_input, session.collected_data)
+            else:
+                refill_result = build_refill_response(refill_input)
+
+            state = refill_result["state"]
+            assistant_message = refill_result["message"]
+            metadata = refill_result["metadata"]
+
+            # Guard: service redirected away from refill (e.g. medical advice request)
+            if refill_result.get("workflow_type") in ("unknown", "GENERAL_CONVERSATION"):
+                workflow_type = "unknown"
+                state = "GENERAL_CONVERSATION"
+                # Clear refill state so next message starts fresh
+                update_session(session.session_id, {
+                    "workflow_type": None,
+                    "state": "GENERAL_CONVERSATION",
+                })
 
     else:
         detected_workflow = _normalize_workflow(extracted.intent or detect_workflow(request.message))
         workflow_type = detected_workflow
         state, assistant_message = get_workflow_response(detected_workflow)
 
+        # Low-confidence NLU: ask a clarifying question instead of guessing
+        if extracted.needs_clarification and state == "GENERAL_CONVERSATION":
+            assistant_message = (
+                "I want to make sure I help you with the right thing — "
+                "could you tell me a bit more? For example, are you looking to "
+                "schedule an appointment, request a prescription refill, or find out "
+                "something about our office?"
+            )
+            state = "GENERAL_CONVERSATION"
+
         # Enhancement 1: Free-form LLM conversation for unknown intents
-        if state == "GENERAL_CONVERSATION" and llm_service.is_enabled():
+        if state == "GENERAL_CONVERSATION" and not extracted.needs_clarification and llm_service.is_enabled():
             try:
                 llm_reply = await asyncio.wait_for(
                     llm_service.generate_general_reply(
@@ -862,4 +1303,31 @@ async def handle_chat(request: ChatRequest):
         message=final_message,
         next_step=updated_session.state,
         metadata=metadata,
+        quick_replies=_build_quick_replies(updated_session.state, metadata),
     )
+
+
+async def _stream_tokens(text: str) -> AsyncGenerator[str, None]:
+    """Yield each word as an SSE data event, simulating token streaming."""
+    words = text.split(" ")
+    for i, word in enumerate(words):
+        chunk = word if i == 0 else " " + word
+        yield f"data: {json.dumps({'token': chunk})}\n\n"
+        await asyncio.sleep(0.03)
+
+
+@router.post("/chat/stream")
+@limiter.limit("20/minute")
+async def handle_chat_stream(body: ChatRequest, request: Request):
+    """SSE streaming variant of /chat.
+    Calls handle_chat internally and streams the final message word-by-word,
+    then sends a final 'done' event with the full ChatResponse payload."""
+    response: ChatResponse = await handle_chat(body, request)
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        async for token_event in _stream_tokens(response.message):
+            yield token_event
+        payload = response.model_dump()
+        yield f"data: {json.dumps({'done': True, 'response': payload})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

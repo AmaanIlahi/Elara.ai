@@ -1,4 +1,5 @@
 import BookedAppointmentCard from "@/components/cards/BookedAppointmentCard";
+import SlotCardsMessage from "@/components/cards/SlotCardsMessage";
 import { Message } from "@/lib/types";
 
 type Props = {
@@ -56,7 +57,7 @@ export default function MessageBubble({
             {message.quickReplies.map((reply) => (
               <button
                 key={reply.id}
-                onClick={() => onQuickReply(reply.label)}
+                onClick={() => onQuickReply(reply.value ?? reply.label)}
                 className="
                   cursor-pointer
                   rounded-full
@@ -82,6 +83,10 @@ export default function MessageBubble({
 
         {message.type === "booking-card" ? (
           <BookedAppointmentCard booking={message.booking} />
+        ) : null}
+
+        {message.type === "slot-cards" ? (
+          <SlotCardsMessage slots={message.slots} onSelect={onQuickReply} />
         ) : null}
       </div>
     </div>

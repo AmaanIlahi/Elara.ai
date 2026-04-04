@@ -13,19 +13,19 @@ REQUIRED_INTAKE_FIELDS = [
 
 
 FIELD_PROMPTS = {
-    "first_name": "Before we continue, may I have your first name?",
-    "last_name": "Thanks. May I also have your last name?",
-    "dob": "What is your date of birth? Please use YYYY-MM-DD format.",
-    "phone_number": "What is your phone number?",
-    "email": "What is your email address?",
+    "first_name": "Before I pull up the available slots, I just need a couple of details. What's your first name?",
+    "last_name": "Thanks! And your last name?",
+    "dob": "Got it. What's your date of birth? (You can say it naturally, like \"Jan 1st 2000\" or use YYYY-MM-DD.)",
+    "phone_number": "What's the best phone number to reach you at?",
+    "email": "Almost there — what's your email address so we can send you a confirmation?",
 }
 
 FIELD_VALIDATION_ERRORS = {
-    "first_name": "That doesn't look like a valid first name. Please enter your first name using letters only.",
-    "last_name": "That doesn't look like a valid last name. Please enter your last name using letters only.",
-    "dob": "That doesn't look like a valid date of birth. Please enter a real past date in YYYY-MM-DD format, for example 2000-01-01.",
-    "phone_number": "That doesn't look like a valid 10-digit phone number. Please enter numbers only, for example 1234567890.",
-    "email": "That doesn't look like a valid email address. Please enter something like name@example.com.",
+    "first_name": "Hmm, I didn't catch that as a name. Could you just share your first name?",
+    "last_name": "I didn't quite get that — what's your last name?",
+    "dob": "That date doesn't look quite right. Could you enter it like \"2000-01-01\" or say it naturally like \"Jan 1st 2000\"?",
+    "phone_number": "I need a 10-digit phone number — just the digits are fine, like 9876543210.",
+    "email": "That doesn't look like a valid email. Could you double-check? Something like name@example.com.",
 }
 
 MONTH_MAP = {
@@ -163,8 +163,20 @@ def normalize_dob(value: str) -> Optional[str]:
     return None
 
 
+def sanitize_text(value: str) -> str:
+    """Strip HTML/script tags and null bytes from any free-text patient input."""
+    import re
+    # Remove null bytes
+    value = value.replace("\x00", "")
+    # Strip HTML tags
+    value = re.sub(r"<[^>]+>", "", value)
+    # Collapse extra whitespace
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
 def extract_field_value(field_name: str, user_message: str) -> Optional[str]:
-    value = user_message.strip()
+    value = sanitize_text(user_message)
 
     if not value:
         return None

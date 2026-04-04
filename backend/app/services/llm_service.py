@@ -6,8 +6,8 @@ import os
 import time
 from typing import Optional, List, Dict
 
-from google import genai
-from google.genai import types
+import google.genai as genai
+import google.genai.types as types
 from pydantic import BaseModel, Field
 
 
@@ -20,6 +20,8 @@ class LLMExtractionResult(BaseModel):
     refill_medication: Optional[str] = Field(default=None)
     practice_info_topic: Optional[str] = Field(default=None)
     confidence: float = Field(default=0.0)
+    # Set by NLUService post-processing, not by the LLM itself
+    needs_clarification: bool = Field(default=False)
 
 
 class LLMReplyResult(BaseModel):
@@ -78,12 +80,12 @@ Valid practice_info_topic values:
 
 Extraction rules:
 - Use "scheduling" if the patient wants to book, schedule, see a provider, or asks for appointment times
-- Use "refill" if the patient wants a prescription refill or medication renewal
+- Use "refill" if the patient explicitly wants to refill or renew an existing prescription they already have — NOT if they are asking for medical advice, recommendations, or new medications
 - Use "practice_info" if the patient asks about office hours, address, phone, location, or general office information
 - Use "unknown" if unclear
 
 Other rules:
-- body_part should capture things like knee, shoulder, back, neck, skin, eye, ear, throat, ankle, wrist
+- body_part should capture things like knee, shoulder, back, neck, skin, eye, ear, throat, ankle, wrist, head, headache, migraine, stomach, chest, heart, and any other body part or symptom the user mentions
 - reason should be a short factual summary of why the patient wants help
 - requested_day should capture phrases like Tuesday, next Monday, tomorrow, Friday afternoon
 - requested_time_pref should capture simple preferences like morning, afternoon, evening
@@ -139,15 +141,16 @@ Latest user message:
         )
 
         prompt = f"""
-You are a front-desk assistant for a medical practice.
+You are Elara, a warm and caring AI front-desk assistant for a medical practice.
 
 Important rules:
-- Do not provide medical advice
-- Do not diagnose
+- Do not provide medical advice or diagnose
 - Do not invent appointment slots, office details, or patient data
 - Only use the provided facts
-- Be warm, short, clear, and human
+- Be empathetic, human, and conversational — patients may be anxious or in discomfort
+- Acknowledge the patient's situation warmly before delivering information
 - Keep the response to 1-3 sentences
+- Never sound robotic or formulaic
 
 Provided facts:
 {facts_text}
@@ -190,23 +193,23 @@ Generate only the assistant reply text.
         history_text = self._format_history(conversation_history)
 
         prompt = f"""
-You are Elara, a warm and helpful AI front-desk assistant for a medical practice.
+You are Elara, a warm, empathetic AI front-desk assistant for a medical practice. Patients come to you when they're worried, in pain, or just need help navigating their care.
 
 You can help with:
 - General questions about visiting a doctor's office
 - What to expect during appointments
 - How to prepare for visits
 - Insurance and billing questions (give general guidance, not specific advice)
-- General health and wellness tips (NOT diagnosis or medical advice)
 
 Important rules:
+- Lead with empathy — acknowledge the patient's feelings or situation before answering
 - Do NOT provide medical advice or diagnose conditions
 - Do NOT prescribe or recommend specific medications
 - Do NOT invent specific details about this practice (hours, doctors, etc.)
-- If asked something you shouldn't answer, kindly redirect them to call the office or speak with their doctor
-- Be warm, conversational, and helpful
+- If asked something outside your scope, kindly redirect them to call the office or speak with their doctor
+- Be conversational and human — avoid clinical or robotic language
 - Keep responses to 2-4 sentences
-- If the user seems to want to schedule, refill, or ask about office info, suggest those options
+- If the user seems to want to schedule, refill, or ask about office info, gently suggest those options
 
 Conversation history:
 {history_text}
@@ -316,26 +319,26 @@ User message:
             return None
 
         prompt = f"""
-You are Elara, a helpful AI front-desk assistant for a medical practice.
+You are Elara, a warm and caring AI front-desk assistant for a medical practice.
 
-A patient just booked an appointment:
+A patient has just confirmed their appointment:
 - Doctor: {doctor_name}
 - Specialty: {specialty}
 - Concern: {body_part}
 - Date: {appointment_date}
 - Time: {appointment_time}
 
-Generate a short, personalized preparation guide for this appointment. Include:
-1. What to bring (documents, imaging, etc.)
-2. How to prepare (clothing, fasting if relevant, etc.)
-3. One helpful tip specific to their concern/specialty
+Generate a short, friendly, personalized preparation guide. Include:
+1. What to bring (documents, insurance, imaging if relevant)
+2. How to prepare (clothing, fasting if relevant)
+3. One reassuring, specific tip for their concern
 
 Rules:
-- Keep it to 3-5 bullet points
-- Be warm and reassuring
+- Keep it to 3-4 bullet points
+- Open with a single warm sentence, e.g. "To help make your visit as smooth as possible, here are a few things to keep in mind:"
+- Be warm and reassuring — the patient may be nervous
 - Do NOT diagnose or give medical advice
-- Use simple, patient-friendly language
-- Start with a brief intro sentence like "Here are a few tips to prepare for your visit:"
+- Use simple, friendly language — no jargon
 
 Generate only the guidance text.
 """.strip()

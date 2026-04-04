@@ -1,4 +1,21 @@
 from datetime import date, timedelta
+from typing import Set
+
+# Global set of booked slot keys — format: "provider_id|date|time"
+# In-memory only; prevents double-booking within a single server process.
+BOOKED_SLOTS: Set[str] = set()
+
+
+def slot_key(provider_id: str, slot_date: str, slot_time: str) -> str:
+    return f"{provider_id}|{slot_date}|{slot_time}"
+
+
+def is_slot_booked(provider_id: str, slot_date: str, slot_time: str) -> bool:
+    return slot_key(provider_id, slot_date, slot_time) in BOOKED_SLOTS
+
+
+def mark_slot_booked(provider_id: str, slot_date: str, slot_time: str) -> None:
+    BOOKED_SLOTS.add(slot_key(provider_id, slot_date, slot_time))
 
 
 def generate_slots(start_days_from_today: int, weekdays: list[int], times: list[str], total_days: int = 45):

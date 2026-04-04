@@ -72,7 +72,9 @@ export type ChatResponse = {
       time: string;
     };
     booking_confirmed?: boolean;
+    slots?: Array<{ date: string; time: string }>;
   };
+  quick_replies?: Array<{ id: string; label: string; value: string }>;
 };
 
 export async function sendChatMessage(
