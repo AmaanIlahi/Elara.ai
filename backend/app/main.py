@@ -32,6 +32,8 @@ app = FastAPI(
     openapi_url=None,
 )
 
+print(settings.startup_summary(), flush=True)
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 

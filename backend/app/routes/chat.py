@@ -43,7 +43,6 @@ router = APIRouter(tags=["Chat"])
 
 nlu_service = NLUService()
 llm_service = LLMService()
-print(f"[STARTUP] LLM Service enabled={llm_service.enabled}, client={llm_service.client is not None}, model={llm_service.model}")
 
 
 def _build_quick_replies(state: str, metadata: dict) -> list:

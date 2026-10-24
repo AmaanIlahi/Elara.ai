@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "Elara AI Backend"
     app_version: str = "0.1.0"
-    debug: bool = True
+    debug: bool = False
 
     frontend_origin: str = "http://localhost:3000"
     api_v1_prefix: str = "/api/v1"
@@ -30,6 +30,17 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+
+    def startup_summary(self) -> str:
+        """One line saying which integrations are configured. Booleans only, never values."""
+        llm = bool(self.llm_enabled and self.llm_provider == "gemini" and self.gemini_api_key)
+        vapi = bool(self.vapi_api_key and self.vapi_phone_number_id)
+        resend = bool(self.resend_api_key)
+        return (
+            f"[STARTUP] {self.app_name} v{self.app_version} "
+            f"debug={self.debug} llm_configured={llm} vapi_configured={vapi} resend_configured={resend}"
+        )
 
 
 settings = Settings()
