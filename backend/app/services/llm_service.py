@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
-import os
+import asyncio
+import json
+import logging
 import time
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 
 import google.genai as genai
 import google.genai.types as types
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("elara.llm")
+
+_shared_client: Any = None
+_shared_client_key: Optional[str] = None
+
+
+def get_shared_client(api_key: str) -> Any:
+    """One genai.Client per process (per API key), shared by every LLMService."""
+    global _shared_client, _shared_client_key
+    if _shared_client is None or _shared_client_key != api_key:
+        _shared_client = genai.Client(api_key=api_key)
+        _shared_client_key = api_key
+    return _shared_client
 
 
 class LLMExtractionResult(BaseModel):
@@ -29,27 +45,58 @@ class LLMReplyResult(BaseModel):
 
 
 class LLMService:
-    def __init__(self) -> None:
+    def __init__(self, client: Any = None, timeout_seconds: Optional[float] = None) -> None:
         from app.core.config import settings
 
         self.enabled = settings.llm_enabled
         self.provider = settings.llm_provider
         self.api_key = settings.gemini_api_key
         self.model = settings.gemini_model
-        self.timeout_seconds = settings.llm_timeout_seconds
+        self.timeout_seconds = (
+            timeout_seconds if timeout_seconds is not None else settings.llm_timeout_seconds
+        )
 
-        self.client = None
-        if self.enabled and self.provider == "gemini" and self.api_key:
-            self.client = genai.Client(api_key=self.api_key)
+        # `client` is injectable for tests; otherwise reuse the process-wide client.
+        self.client = client
+        if self.client is None and self.enabled and self.provider == "gemini" and self.api_key:
+            self.client = get_shared_client(self.api_key)
 
     def is_enabled(self) -> bool:
         return self.client is not None
+
+    async def _generate(
+        self,
+        label: str,
+        prompt: str,
+        config: "types.GenerateContentConfig",
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Async Gemini call with a real timeout. Returns the response, or None on
+        timeout/error (logged with the function label, never the prompt or reply,
+        since both can contain patient data)."""
+        limit = timeout if timeout is not None else self.timeout_seconds
+        started_at = time.monotonic()
+        try:
+            return await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model, contents=prompt, config=config
+                ),
+                timeout=limit,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[LLM] %s timed out after %.1fs", label, limit)
+        except Exception:
+            logger.exception(
+                "[LLM] %s failed after %dms", label, int((time.monotonic() - started_at) * 1000)
+            )
+        return None
 
     async def extract_structured_intent(
         self,
         user_message: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         current_state: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[LLMExtractionResult]:
         if not self.is_enabled():
             return None
@@ -101,35 +148,28 @@ Latest user message:
 {user_message}
 """.strip()
 
-        started_at = time.time()
-
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    response_mime_type="application/json",
-                    response_schema=LLMExtractionResult,
-                ),
-            )
-
-            latency_ms = int((time.time() - started_at) * 1000)
-
-            if not response.parsed:
-                return None
-
-            parsed = response.parsed
-            parsed.confidence = float(parsed.confidence or 0.0)
-            return parsed
-
-        except Exception:
+        response = await self._generate(
+            "extract_structured_intent",
+            prompt,
+            types.GenerateContentConfig(
+                temperature=0,
+                response_mime_type="application/json",
+                response_schema=LLMExtractionResult,
+            ),
+            timeout,
+        )
+        if response is None or not response.parsed:
             return None
+
+        parsed = response.parsed
+        parsed.confidence = float(parsed.confidence or 0.0)
+        return parsed
 
     async def generate_chat_reply(
         self,
         system_facts: Dict[str, str],
         conversation_history: Optional[List[Dict[str, str]]] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[str]:
         if not self.is_enabled():
             return None
@@ -161,28 +201,26 @@ Conversation history:
 Generate only the assistant reply text.
 """.strip()
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.4,
-                ),
-            )
-
-            text = getattr(response, "text", None)
-            if not text:
-                return None
-
-            return text.strip()
-
-        except Exception:
+        response = await self._generate(
+            "generate_chat_reply",
+            prompt,
+            types.GenerateContentConfig(temperature=0.4),
+            timeout,
+        )
+        if response is None:
             return None
+
+        text = getattr(response, "text", None)
+        if not text:
+            return None
+
+        return text.strip()
 
     async def generate_general_reply(
         self,
         user_message: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[str]:
         """Enhancement 1: Free-form conversation — lets the LLM answer general
         patient questions (e.g. 'what should I bring to my first visit?')
@@ -220,29 +258,26 @@ User message:
 Generate only the assistant reply text.
 """.strip()
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.7,
-                ),
-            )
-
-            text = getattr(response, "text", None)
-            if not text:
-                return None
-
-            return text.strip()
-
-        except Exception as e:
-            print(f"[LLM] General reply ERROR: {e}")
+        response = await self._generate(
+            "generate_general_reply",
+            prompt,
+            types.GenerateContentConfig(temperature=0.7),
+            timeout,
+        )
+        if response is None:
             return None
+
+        text = getattr(response, "text", None)
+        if not text:
+            return None
+
+        return text.strip()
 
     async def extract_intake_fields(
         self,
         user_message: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[Dict[str, str]]:
         """Enhancement 2: Natural intake — lets users provide multiple fields
         in one message (e.g. 'I'm John Smith, born July 30 1998, email john@gmail.com')
@@ -279,30 +314,31 @@ User message:
 {user_message}
 """.strip()
 
+        response = await self._generate(
+            "extract_intake_fields",
+            prompt,
+            types.GenerateContentConfig(
+                temperature=0,
+                response_mime_type="application/json",
+            ),
+            timeout,
+        )
+        if response is None:
+            return None
+
+        text = getattr(response, "text", None)
+        if not text:
+            return None
+
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    response_mime_type="application/json",
-                ),
-            )
-
-            text = getattr(response, "text", None)
-            if not text:
-                return None
-
-            import json
             parsed = json.loads(text.strip())
-            if isinstance(parsed, dict) and len(parsed) > 0:
-                return parsed
-
+        except json.JSONDecodeError:
+            logger.warning("[LLM] extract_intake_fields returned non-JSON output")
             return None
+        if isinstance(parsed, dict) and len(parsed) > 0:
+            return parsed
 
-        except Exception as e:
-            print(f"[LLM] Intake extraction ERROR: {e}")
-            return None
+        return None
 
     async def generate_post_booking_guidance(
         self,
@@ -311,6 +347,7 @@ User message:
         doctor_name: str,
         appointment_date: str,
         appointment_time: str,
+        timeout: Optional[float] = None,
     ) -> Optional[str]:
         """Enhancement 5: Post-booking guidance — generates personalized
         preparation tips after an appointment is booked, based on the
@@ -343,26 +380,20 @@ Rules:
 Generate only the guidance text.
 """.strip()
 
-        try:
-            print(f"[LLM] Calling generate_post_booking_guidance for {doctor_name}, {specialty}, {body_part}")
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.6,
-                ),
-            )
-
-            text = getattr(response, "text", None)
-            print(f"[LLM] Post-booking guidance response: {text[:100] if text else 'None'}")
-            if not text:
-                return None
-
-            return text.strip()
-
-        except Exception as e:
-            print(f"[LLM] Post-booking guidance ERROR: {e}")
+        response = await self._generate(
+            "generate_post_booking_guidance",
+            prompt,
+            types.GenerateContentConfig(temperature=0.6),
+            timeout,
+        )
+        if response is None:
             return None
+
+        text = getattr(response, "text", None)
+        if not text:
+            return None
+
+        return text.strip()
 
     def _format_history(
         self,
