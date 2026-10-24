@@ -18,6 +18,19 @@ def mark_slot_booked(provider_id: str, slot_date: str, slot_time: str) -> None:
     BOOKED_SLOTS.add(slot_key(provider_id, slot_date, slot_time))
 
 
+def try_mark_slot_booked(provider_id: str, slot_date: str, slot_time: str) -> bool:
+    """Atomically claim a slot. Returns False if someone already holds it.
+
+    There is no await between the membership test and the add, so within one
+    process (the current single-worker deployment) this cannot interleave.
+    """
+    key = slot_key(provider_id, slot_date, slot_time)
+    if key in BOOKED_SLOTS:
+        return False
+    BOOKED_SLOTS.add(key)
+    return True
+
+
 def generate_slots(start_days_from_today: int, weekdays: list[int], times: list[str], total_days: int = 45):
     slots = []
     today = date.today()

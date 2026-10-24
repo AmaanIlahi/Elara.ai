@@ -102,6 +102,13 @@ async def execute_voice_tool(tool_name: str, params: dict[str, Any]) -> dict[str
                     "metadata": result.get("metadata"),
                 }
 
+            if result.get("metadata", {}).get("slot_conflict"):
+                # Keep the refreshed slot list so the next spoken choice matches it.
+                update_session(session.session_id, {
+                    "state": result["state"],
+                    "collected_data": _merged_collected_data(session, result["metadata"]),
+                })
+
             return {
                 "success": False,
                 "response": result["message"],

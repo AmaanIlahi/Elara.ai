@@ -692,6 +692,7 @@ async def handle_chat(body: ChatRequest, request: Request):
                         message=final_message,
                         next_step=updated_session.state,
                         metadata=booking_metadata,
+                        quick_replies=_build_quick_replies(updated_session.state, booking_metadata),
                     )
 
             if declined:

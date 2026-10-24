@@ -2,7 +2,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 import re
 
-from app.data.provider_data import PROVIDERS, is_slot_booked, mark_slot_booked
+from app.data.provider_data import PROVIDERS, is_slot_booked, try_mark_slot_booked
 from app.data.practice_data import PRACTICE_INFO
 
 
@@ -411,9 +411,11 @@ def confirm_booking_from_session_data(collected_data: dict, slot_choice: int) ->
         "booking_confirmed": True,
     }
 
-    # Mark the slot as taken so no other session can book it
+    # Claim the slot atomically. Another session may have booked it after this
+    # one was shown the list, so re-check at the moment of booking.
     provider_id = collected_data.get("provider_id", "")
-    mark_slot_booked(provider_id, selected_slot["date"], selected_slot["time"])
+    if not try_mark_slot_booked(provider_id, selected_slot["date"], selected_slot["time"]):
+        return False, _slot_conflict_result(collected_data, provider_id, selected_slot)
 
     slot_label = format_slot_date(selected_slot["date"], selected_slot["time"])
     return True, {
@@ -424,6 +426,54 @@ def confirm_booking_from_session_data(collected_data: dict, slot_choice: int) ->
             f"You'll receive a confirmation email shortly."
         ),
         "metadata": confirmation_metadata,
+    }
+
+
+def _slot_conflict_result(collected_data: dict, provider_id: str, taken_slot: Dict[str, str]) -> dict:
+    """Friendly 'that slot was just taken' result carrying the slots still free."""
+    provider_name = collected_data.get("provider_name") or ""
+    specialty = collected_data.get("specialty") or ""
+    body_part = collected_data.get("body_part") or ""
+
+    remaining = [
+        s for s in collected_data.get("slots", [])
+        if not is_slot_booked(provider_id, s["date"], s["time"])
+    ]
+    if not remaining:
+        provider = next((p for p in PROVIDERS if p["provider_id"] == provider_id), None)
+        remaining = get_next_available_slots(provider) if provider else []
+    remaining = remaining[:5]
+
+    taken_label = format_slot_date(taken_slot["date"], taken_slot["time"])
+    if remaining:
+        message = build_slot_list_message(
+            provider_name,
+            specialty,
+            body_part,
+            remaining,
+            intro=(
+                f"Sorry, the {taken_label} slot was just booked by someone else. "
+                f"Here are the times that are still open with {provider_name} ({specialty}):"
+            ),
+        )
+    else:
+        phone = PRACTICE_INFO.get("phone", "the office")
+        message = (
+            f"Sorry, the {taken_label} slot was just booked by someone else, and I don't see "
+            f"other openings right now. Please call the office at {phone} and they'll help."
+        )
+
+    return {
+        "state": "SCHEDULING_SHOWING_SLOTS" if remaining else "SCHEDULING_NO_SLOTS_FOUND",
+        "message": message,
+        "metadata": {
+            "slot_conflict": True,
+            "provider_id": provider_id,
+            "provider_name": provider_name,
+            "specialty": specialty,
+            "body_part": body_part,
+            "slots": remaining,
+        },
     }
 
 
