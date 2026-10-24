@@ -9,6 +9,15 @@ from app.services.scheduling_service import (
 )
 
 
+def _merged_collected_data(session, metadata) -> dict[str, Any]:
+    """Layer new tool metadata over the existing collected_data.
+
+    update_session() setattr()s whole fields, so passing just the metadata would
+    discard the patient's intake details and conversation history mid-call.
+    """
+    return {**(session.collected_data or {}), **(metadata or {})}
+
+
 async def execute_voice_tool(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
     session_id = params.get("session_id")
     if not session_id:
@@ -39,7 +48,7 @@ async def execute_voice_tool(tool_name: str, params: dict[str, Any]) -> dict[str
             update_session(session.session_id, {
                 "state": response["state"],
                 "workflow_type": response.get("workflow_type"),
-                "collected_data": response.get("metadata", {}),
+                "collected_data": _merged_collected_data(session, response.get("metadata")),
             })
 
             return {
@@ -61,7 +70,7 @@ async def execute_voice_tool(tool_name: str, params: dict[str, Any]) -> dict[str
         if preference_result:
             update_session(session.session_id, {
                 "state": preference_result["state"],
-                "collected_data": preference_result.get("metadata", {}),
+                "collected_data": _merged_collected_data(session, preference_result.get("metadata")),
             })
 
             return {
@@ -83,7 +92,7 @@ async def execute_voice_tool(tool_name: str, params: dict[str, Any]) -> dict[str
             if success:
                 update_session(session.session_id, {
                     "state": result["state"],
-                    "collected_data": result.get("metadata", {}),
+                    "collected_data": _merged_collected_data(session, result.get("metadata")),
                 })
 
                 return {
