@@ -8,6 +8,8 @@ import ChatInput from "./ChatInput";
 import { Message } from "@/lib/types";
 import {
   SessionExpiredError,
+  getFriendlyErrorMessage,
+  warmUpBackend,
   sendChatMessage,
   startVoiceHandoff,
   sendBookingConfirmationEmail,
@@ -89,6 +91,8 @@ export default function ChatShell() {
   // True only after a /chat call succeeded in this page load, i.e. the backend
   // is known to hold the session. Restored ids from sessionStorage don't count.
   const [sessionConfirmed, setSessionConfirmed] = useState(false);
+  // Shown when a request takes >2 s, which usually means Fly is waking the backend.
+  const [isWaking, setIsWaking] = useState(false);
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -121,6 +125,14 @@ export default function ChatShell() {
     if (storedMeta) setChatMeta(storedMeta);
     if (storedSessionId) setSessionIdState(storedSessionId);
     setHydrated(true);
+  }, []);
+
+  // Wake the backend as soon as the page loads so it is warm by the first message.
+  useEffect(() => {
+    let cancelled = false;
+    warmUpBackend({ onSlow: () => { if (!cancelled) setIsWaking(true); } })
+      .finally(() => { if (!cancelled) setIsWaking(false); });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => { if (hydrated) setStoredMessages(messages); }, [messages, hydrated]);
@@ -156,11 +168,10 @@ export default function ChatShell() {
     try {
       let response;
       try {
-        response = await sendChatMessage({
-          message: trimmed,
-          session_id: sessionId,
-          phone_number: null,
-        });
+        response = await sendChatMessage(
+          { message: trimmed, session_id: sessionId, phone_number: null },
+          { onSlow: () => setIsWaking(true) }
+        );
       } catch (error) {
         if (!(error instanceof SessionExpiredError)) throw error;
 
@@ -177,11 +188,10 @@ export default function ChatShell() {
             "Your previous session expired, starting a new one."
           )
         );
-        response = await sendChatMessage({
-          message: trimmed,
-          session_id: null,
-          phone_number: null,
-        });
+        response = await sendChatMessage(
+          { message: trimmed, session_id: null, phone_number: null },
+          { onSlow: () => setIsWaking(true) }
+        );
       }
 
       setSessionConfirmed(true);
@@ -262,21 +272,18 @@ export default function ChatShell() {
           try {
             await sendBookingConfirmationEmail(activeSessionId);
           } catch (error) {
-            alert(error instanceof Error ? error.message : "Email send failed");
+            alert(getFriendlyErrorMessage(error));
           }
         }
       }
-    } catch (error: any) {
+    } catch (error) {
       removeTypingMessage();
       appendMessage(
-        createTextMessage(
-          createId(),
-          "assistant",
-          error.message || "Something went wrong while connecting to the backend."
-        )
+        createTextMessage(createId(), "assistant", getFriendlyErrorMessage(error))
       );
     } finally {
       setIsTyping(false);
+      setIsWaking(false);
     }
   };
 
@@ -292,13 +299,9 @@ export default function ChatShell() {
           response.message || "Calling your phone now. Please pick up to continue."
         )
       );
-    } catch (error: any) {
+    } catch (error) {
       appendMessage(
-        createTextMessage(
-          createId(),
-          "assistant",
-          error.message || "I couldn't start the phone handoff right now."
-        )
+        createTextMessage(createId(), "assistant", getFriendlyErrorMessage(error))
       );
     } finally {
       setIsCalling(false);
@@ -332,6 +335,16 @@ export default function ChatShell() {
           </div>
 
           <div className="border-t border-slate-200/60">
+            {isWaking && (
+              <div
+                role="status"
+                className="flex items-center gap-2 border-b border-sky-100 bg-sky-50 px-4 py-2 text-xs text-sky-700"
+              >
+                <span className="h-2 w-2 animate-pulse rounded-full bg-sky-500" />
+                Waking up the assistant…
+              </div>
+            )}
+
             {/* Session timeout warning banner */}
             {showTimeoutWarning && (
               <div className="flex items-center justify-between gap-3 bg-amber-50 px-4 py-2 text-xs text-amber-700 border-b border-amber-100">
