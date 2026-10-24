@@ -37,7 +37,7 @@ from app.services.scheduling_service import (
     parse_time_choice,
     resolve_slot_preference,
 )
-from app.services.session_service import create_session, get_session, update_session
+from app.services.session_service import SessionExpired, create_session, get_session, update_session
 
 router = APIRouter(tags=["Chat"])
 
@@ -207,7 +207,7 @@ async def handle_chat(body: ChatRequest, request: Request):
     if request.session_id:
         session = get_session(request.session_id)
         if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+            raise SessionExpired(request.session_id)
 
     if not session:
         session = create_session(phone_number=request.phone_number)
