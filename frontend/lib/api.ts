@@ -77,6 +77,13 @@ export type ChatResponse = {
   quick_replies?: Array<{ id: string; label: string; value: string }>;
 };
 
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("session_expired");
+    this.name = "SessionExpiredError";
+  }
+}
+
 export async function sendChatMessage(
   payload: ChatRequest
 ): Promise<ChatResponse> {
@@ -89,6 +96,10 @@ export async function sendChatMessage(
   });
 
   const data = await response.json().catch(() => null);
+
+  if (response.status === 404 && data?.error === "session_expired") {
+    throw new SessionExpiredError();
+  }
 
   if (!response.ok) {
     throw new Error(data?.detail || "Failed to connect to backend");

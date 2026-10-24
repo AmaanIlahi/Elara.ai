@@ -6,8 +6,14 @@ import MessageList from "./MessageList";
 import MessageListErrorBoundary from "./MessageListErrorBoundary";
 import ChatInput from "./ChatInput";
 import { Message } from "@/lib/types";
-import { sendChatMessage, startVoiceHandoff, sendBookingConfirmationEmail } from "@/lib/api";
 import {
+  SessionExpiredError,
+  sendChatMessage,
+  startVoiceHandoff,
+  sendBookingConfirmationEmail,
+} from "@/lib/api";
+import {
+  clearLegacyLocalStorage,
   clearStoredChatState,
   getStoredChatMeta,
   getStoredMessages,
@@ -80,6 +86,9 @@ export default function ChatShell() {
   const [hydrated, setHydrated] = useState(false);
   const [sessionId, setSessionIdState] = useState<string | null>(null);
   const [showTimeoutWarning, setShowTimeoutWarning] = useState(false);
+  // True only after a /chat call succeeded in this page load, i.e. the backend
+  // is known to hold the session. Restored ids from sessionStorage don't count.
+  const [sessionConfirmed, setSessionConfirmed] = useState(false);
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -101,6 +110,7 @@ export default function ChatShell() {
 
   // --- Hydration ---
   useEffect(() => {
+    clearLegacyLocalStorage();
     const storedMessages = getStoredMessages<Message>();
     const storedMeta = getStoredChatMeta<typeof DEFAULT_CHAT_META>();
     const storedSessionId = getStoredSessionId();
@@ -144,12 +154,37 @@ export default function ChatShell() {
     const startedAt = Date.now();
 
     try {
-      const response = await sendChatMessage({
-        message: trimmed,
-        session_id: sessionId,
-        phone_number: null,
-      });
+      let response;
+      try {
+        response = await sendChatMessage({
+          message: trimmed,
+          session_id: sessionId,
+          phone_number: null,
+        });
+      } catch (error) {
+        if (!(error instanceof SessionExpiredError)) throw error;
 
+        // The backend no longer knows this session (restart, redeploy, idle stop).
+        // Drop stored state and retry once as a brand-new session.
+        clearStoredChatState();
+        setSessionIdState(null);
+        setSessionConfirmed(false);
+        setChatMeta(DEFAULT_CHAT_META);
+        appendMessage(
+          createTextMessage(
+            createId(),
+            "assistant",
+            "Your previous session expired, starting a new one."
+          )
+        );
+        response = await sendChatMessage({
+          message: trimmed,
+          session_id: null,
+          phone_number: null,
+        });
+      }
+
+      setSessionConfirmed(true);
       const activeSessionId = response.session_id || sessionId || null;
 
       if (response.session_id) {
@@ -246,7 +281,7 @@ export default function ChatShell() {
   };
 
   const handleVoiceHandoff = async () => {
-    if (!sessionId || isCalling) return;
+    if (!sessionId || !sessionConfirmed || isCalling) return;
     try {
       setIsCalling(true);
       const response = await startVoiceHandoff(sessionId);
@@ -277,6 +312,7 @@ export default function ChatShell() {
     setIsTyping(false);
     setIsCalling(false);
     setSessionIdState(null);
+    setSessionConfirmed(false);
     setShowTimeoutWarning(false);
     resetTimeout();
   };
@@ -319,7 +355,7 @@ export default function ChatShell() {
 
               <button
                 onClick={handleVoiceHandoff}
-                disabled={!sessionId || isCalling || isTyping}
+                disabled={!sessionId || !sessionConfirmed || isCalling || isTyping}
                 className="inline-flex cursor-pointer items-center rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-sm font-medium text-green-700 transition hover:bg-green-100 hover:text-green-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isCalling ? "Calling..." : "Continue on phone"}
