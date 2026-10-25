@@ -159,6 +159,22 @@ def test_handoff_assistant_carries_webhook_secret(vapi):
     assert all("secret" not in t["server"] for t in assistant["model"]["tools"])
 
 
+def test_handoff_assistant_only_subscribes_to_needed_server_messages(vapi):
+    _handoff(_session_with_phone(), 1)
+    assistant = vapi.calls[0]["json"]["assistant"]
+    assert assistant["serverMessages"] == ["tool-calls", "end-of-call-report"]
+
+
+def test_end_of_call_report_is_acknowledged_without_logging_contents(monkeypatch, caplog, capsys):
+    monkeypatch.setattr(settings, "vapi_webhook_secret", "s3cret")
+    body = {"message": {"type": "end-of-call-report", "transcript": "PRIVATE-TRANSCRIPT", "summary": "PRIVATE-SUMMARY"}}
+    with caplog.at_level("DEBUG"):
+        r = client.post("/api/v1/voice/webhook", json=body, headers={"X-Vapi-Secret": "s3cret"})
+    assert r.status_code == 200
+    out = capsys.readouterr().out + caplog.text
+    assert "PRIVATE" not in out
+
+
 def test_handoff_claim_released_when_vapi_rejects(vapi):
     sid = _session_with_phone()
     vapi.status = 500

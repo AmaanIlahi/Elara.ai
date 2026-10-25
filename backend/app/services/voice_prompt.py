@@ -107,6 +107,9 @@ def build_vapi_assistant(session) -> dict:
             "voiceId": "Clara"
         },
         "server": _server_block(server),
+        # Only what the webhook uses; no speech-update/transcript/status traffic.
+        # end-of-call-report is acknowledged and its contents are never logged.
+        "serverMessages": ["tool-calls", "end-of-call-report"],
         "metadata": {
             "session_id": session.session_id
         }

@@ -9,16 +9,12 @@ client = TestClient(app)
 BACKEND = Path(__file__).resolve().parent.parent
 
 
-def test_health_requests_are_not_logged(capsys):
-    client.get("/api/v1/health")
-    assert "/api/v1/health" not in capsys.readouterr().out
-
-
-def test_other_requests_are_still_logged(capsys):
+def test_app_adds_no_request_logging_of_its_own(capsys):
+    # uvicorn's access log is the single per-request line; the app must not duplicate it.
     client.get("/api/v1/practice/info")
+    client.get("/api/v1/health")
     out = capsys.readouterr().out
-    assert "REQUEST: GET /api/v1/practice/info" in out
-    assert "RESPONSE: 200 /api/v1/practice/info" in out
+    assert "REQUEST:" not in out and "RESPONSE:" not in out
 
 
 def test_unused_settings_are_gone():

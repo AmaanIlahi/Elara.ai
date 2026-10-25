@@ -53,20 +53,10 @@ app.add_middleware(
 )
 
 
-# Fly's check and the browser warm-up hit this every few seconds; keep it out of the logs.
+# Each request is logged once, by uvicorn's access log. Fly's check and the browser
+# warm-up hit /health every few seconds; keep it out of that log.
 LOG_SKIP_PATHS = {f"{settings.api_v1_prefix}/health"}
-skip_paths_in_access_log(LOG_SKIP_PATHS)  # uvicorn's own access log too
-
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    if request.url.path in LOG_SKIP_PATHS:
-        return await call_next(request)
-
-    print(f"REQUEST: {request.method} {request.url.path}", flush=True)
-    response = await call_next(request)
-    print(f"RESPONSE: {response.status_code} {request.url.path}", flush=True)
-    return response
+skip_paths_in_access_log(LOG_SKIP_PATHS)
 
 
 @app.get("/", tags=["Root"])
