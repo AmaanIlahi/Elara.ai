@@ -12,7 +12,6 @@ import {
   warmUpBackend,
   sendChatMessage,
   startVoiceHandoff,
-  sendBookingConfirmationEmail,
 } from "@/lib/api";
 import {
   clearLegacyLocalStorage,
@@ -265,16 +264,9 @@ export default function ChatShell() {
             specialty: response.metadata.specialty,
             body_part: response.metadata.body_part,
             booked_slot: response.metadata.booked_slot,
+            session_id: activeSessionId ?? undefined,
           },
         });
-
-        if (activeSessionId) {
-          try {
-            await sendBookingConfirmationEmail(activeSessionId);
-          } catch (error) {
-            alert(getFriendlyErrorMessage(error));
-          }
-        }
       }
     } catch (error) {
       removeTypingMessage();

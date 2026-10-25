@@ -1,7 +1,7 @@
 import os
 import sys
 
-# Make `app` importable and keep tests hermetic: no real LLM/VAPI/Resend config.
+# Make `app` importable and keep tests hermetic: no real LLM/VAPI config.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["LLM_ENABLED"] = "false"
 os.environ.pop("GEMINI_API_KEY", None)

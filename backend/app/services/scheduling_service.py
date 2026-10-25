@@ -422,8 +422,7 @@ def confirm_booking_from_session_data(collected_data: dict, slot_choice: int) ->
         "state": "BOOKED",
         "message": (
             f"You're all set! Your appointment with {provider_name} ({specialty}) "
-            f"for {body_part} is confirmed for {slot_label}. "
-            f"You'll receive a confirmation email shortly."
+            f"for {body_part} is confirmed for {slot_label}."
         ),
         "metadata": confirmation_metadata,
     }

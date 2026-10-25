@@ -258,15 +258,26 @@ export async function startVoiceHandoff(
   return parseOrThrow<VoiceHandoffResponse>(response);
 }
 
-export async function sendBookingConfirmationEmail(
+/** Fetch the appointment's .ics file and hand it to the browser as a download. */
+export async function downloadCalendarFile(
   sessionId: string,
   options: RequestOptions = {}
-) {
-  // Safe to retry: the backend sends at most one email per session.
+): Promise<void> {
   const response = await apiFetch(
-    `${API_BASE_URL}/api/v1/send-confirmation-email`,
-    jsonPost({ session_id: sessionId }),
+    `${API_BASE_URL}/api/v1/appointments/${encodeURIComponent(sessionId)}/calendar.ics`,
+    { method: "GET" },
     options
   );
-  return parseOrThrow<{ success: boolean; message: string }>(response);
+  if (!response.ok) {
+    throw new ApiError("http", `HTTP ${response.status}`, response.status);
+  }
+
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "elara-appointment.ics";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }

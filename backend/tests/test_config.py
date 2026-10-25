@@ -2,7 +2,7 @@ from app.core.config import Settings
 
 
 def _clean(monkeypatch):
-    for k in ("DEBUG", "LLM_ENABLED", "GEMINI_API_KEY", "VAPI_API_KEY", "VAPI_PHONE_NUMBER_ID", "RESEND_API_KEY"):
+    for k in ("DEBUG", "LLM_ENABLED", "GEMINI_API_KEY", "VAPI_API_KEY", "VAPI_PHONE_NUMBER_ID"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -16,7 +16,7 @@ def test_startup_summary_reports_unconfigured(monkeypatch):
     line = Settings(_env_file=None).startup_summary()
     assert "llm_configured=False" in line
     assert "vapi_configured=False" in line
-    assert "resend_configured=False" in line
+    assert "resend" not in line
 
 
 def test_startup_summary_never_leaks_values():
@@ -26,13 +26,11 @@ def test_startup_summary_never_leaks_values():
         gemini_api_key="SECRET-GEMINI",
         vapi_api_key="SECRET-VAPI",
         vapi_phone_number_id="PHONE-ID-123",
-        resend_api_key="SECRET-RESEND",
     )
     line = s.startup_summary()
     assert "llm_configured=True" in line
     assert "vapi_configured=True" in line
-    assert "resend_configured=True" in line
-    for secret in ("SECRET-GEMINI", "SECRET-VAPI", "PHONE-ID-123", "SECRET-RESEND"):
+    for secret in ("SECRET-GEMINI", "SECRET-VAPI", "PHONE-ID-123"):
         assert secret not in line
 
 

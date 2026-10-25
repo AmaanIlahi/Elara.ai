@@ -14,6 +14,8 @@ export type BookingCardData = {
     date: string;
     time: string;
   };
+  /** Needed for the "Add to calendar" download; absent on cards saved by older versions. */
+  session_id?: string;
 };
 
 type BaseMessage = {

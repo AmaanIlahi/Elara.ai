@@ -22,9 +22,6 @@ class Settings(BaseSettings):
     public_frontend_base_url: str = "http://localhost:3000"
     vapi_assistant_name: str = "Elara Voice Scheduler"
 
-    resend_api_key: Optional[str] = None
-    resend_from_email: str = "Elara <onboarding@resend.dev>"
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -36,10 +33,9 @@ class Settings(BaseSettings):
         """One line saying which integrations are configured. Booleans only, never values."""
         llm = bool(self.llm_enabled and self.llm_provider == "gemini" and self.gemini_api_key)
         vapi = bool(self.vapi_api_key and self.vapi_phone_number_id)
-        resend = bool(self.resend_api_key)
         return (
             f"[STARTUP] {self.app_name} v{self.app_version} "
-            f"debug={self.debug} llm_configured={llm} vapi_configured={vapi} resend_configured={resend}"
+            f"debug={self.debug} llm_configured={llm} vapi_configured={vapi}"
         )
 
 

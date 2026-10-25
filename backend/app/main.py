@@ -17,7 +17,7 @@ from app.routes.scheduling import router as scheduling_router
 from app.routes.booking import router as booking_router
 from app.routes.refill import router as refill_router
 from app.routes.voice import router as voice_router
-from app.routes.email import router as email_router
+from app.routes.appointments import router as appointments_router
 
 # print("MAIN FILE LOADED", flush=True)
 # print("EMAIL ROUTER IMPORTED:", email_router, flush=True)
@@ -82,7 +82,7 @@ app.include_router(scheduling_router, prefix=settings.api_v1_prefix)
 app.include_router(booking_router, prefix=settings.api_v1_prefix)
 app.include_router(refill_router, prefix=settings.api_v1_prefix)
 app.include_router(voice_router, prefix=settings.api_v1_prefix)
-app.include_router(email_router, prefix=settings.api_v1_prefix)
+app.include_router(appointments_router, prefix=settings.api_v1_prefix)
 
 # print("=== REGISTERED ROUTES ===", flush=True)
 # for route in app.routes:
