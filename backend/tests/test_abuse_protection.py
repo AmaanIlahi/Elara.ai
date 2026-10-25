@@ -147,8 +147,13 @@ def test_handoff_allowed_once_per_session(vapi):
 def test_handoff_assistant_carries_webhook_secret(vapi):
     _handoff(_session_with_phone(), 1)
     assistant = vapi.calls[0]["json"]["assistant"]
-    assert assistant["server"]["secret"] == "s3cret"
-    assert all(t["server"]["secret"] == "s3cret" for t in assistant["model"]["tools"])
+    expected = {"X-Vapi-Secret": "s3cret"}
+    assert assistant["server"]["headers"] == expected
+    assert len(assistant["model"]["tools"]) == 2
+    assert all(t["server"]["headers"] == expected for t in assistant["model"]["tools"])
+    # The legacy field is no longer used anywhere.
+    assert "secret" not in assistant["server"]
+    assert all("secret" not in t["server"] for t in assistant["model"]["tools"])
 
 
 def test_handoff_claim_released_when_vapi_rejects(vapi):

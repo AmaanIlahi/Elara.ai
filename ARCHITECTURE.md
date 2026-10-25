@@ -187,7 +187,7 @@ stateDiagram-v2
 * No mid-flow Q&A exists in `SCHEDULING_CONFIRMING` (non-yes/no input just re-asks) or in the refill flow.
 
 **Voice handoff**
-* `/voice/handoff` requires a valid US phone number in the session and claims the session's single call before contacting VAPI (released only if VAPI rejects the request). It builds a VAPI assistant whose system prompt embeds `session_id`, `state` and **the whole `collected_data` dict**. The model is hard-coded to OpenAI `gpt-4.1` in VAPI. Two tools are exposed (`get_session_context`, `continue_scheduling`), both served by `/voice/webhook`, and the assistant plus each tool carry `server.secret`.
+* `/voice/handoff` requires a valid US phone number in the session and claims the session's single call before contacting VAPI (released only if VAPI rejects the request). It builds a VAPI assistant whose system prompt embeds `session_id`, `state` and **the whole `collected_data` dict**. The model is hard-coded to OpenAI `gpt-4.1` in VAPI. Two tools are exposed (`get_session_context`, `continue_scheduling`), both served by `/voice/webhook`, and the assistant plus each tool carry `server.headers = {"X-Vapi-Secret": <VAPI_WEBHOOK_SECRET>}` (sent explicitly, not via the legacy `server.secret` field).
 * `continue_scheduling` re-implements a reduced version of the chat logic. Tool metadata is now **merged** into `collected_data` instead of replacing it *(Phase 0)*.
 
 ---

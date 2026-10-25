@@ -42,11 +42,17 @@ def build_first_message(session) -> str:
     return f"Hi, I'm calling to continue helping you schedule {reason}."
 
 
+def _server_block(server: dict) -> dict:
+    # Copy the nested headers too, so the three blocks never share one dict.
+    return {**server, "headers": dict(server["headers"])}
+
+
 def build_vapi_assistant(session) -> dict:
     webhook_url = f"{settings.public_backend_base_url}{settings.api_v1_prefix}/voice/webhook"
-    # VAPI sends `secret` back in the X-Vapi-Secret header. A tool's own `server`
-    # block overrides the assistant-level one, so every tool carries it too.
-    server = {"url": webhook_url, "secret": settings.vapi_webhook_secret}
+    # The secret is sent explicitly as an X-Vapi-Secret header rather than via the
+    # legacy `secret` field. A tool's own `server` block overrides the assistant-level
+    # one, so every tool carries it too.
+    server = {"url": webhook_url, "headers": {"X-Vapi-Secret": settings.vapi_webhook_secret}}
 
     return {
         "name": settings.vapi_assistant_name,
@@ -64,7 +70,7 @@ def build_vapi_assistant(session) -> dict:
                 {
                     "type": "function",
                     "async": False,
-                    "server": dict(server),
+                    "server": _server_block(server),
                     "function": {
                         "name": "get_session_context",
                         "description": "Get the current backend session state and collected scheduling context.",
@@ -80,7 +86,7 @@ def build_vapi_assistant(session) -> dict:
                 {
                     "type": "function",
                     "async": False,
-                    "server": dict(server),
+                    "server": _server_block(server),
                     "function": {
                         "name": "continue_scheduling",
                         "description": "Continue the scheduling conversation using the caller's latest spoken message.",
@@ -100,7 +106,7 @@ def build_vapi_assistant(session) -> dict:
             "provider": "vapi",
             "voiceId": "Clara"
         },
-        "server": dict(server),
+        "server": _server_block(server),
         "metadata": {
             "session_id": session.session_id
         }
