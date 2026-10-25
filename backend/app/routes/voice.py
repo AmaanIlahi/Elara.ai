@@ -1,5 +1,6 @@
 import hmac
 import json
+import logging
 import httpx
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,7 +16,28 @@ from app.services.session_service import get_session, update_session
 
 WEBHOOK_SECRET_HEADER = "x-vapi-secret"
 
+logger = logging.getLogger("elara.voice")
+
+MAX_LOGGED_ERROR_CHARS = 500
+
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+
+def _vapi_error_message(response) -> str:
+    """VAPI's JSON "message" (a string or a list of strings), single-line and capped.
+
+    Only this field is ever read: never the request payload, which holds the phone
+    number and collected_data, and never the headers, which hold the API key.
+    """
+    try:
+        message = response.json().get("message")
+    except (ValueError, AttributeError):
+        message = None
+    if isinstance(message, list):
+        message = "; ".join(str(m) for m in message)
+    if not message:
+        return "(no message)"
+    return " ".join(str(message).split())[:MAX_LOGGED_ERROR_CHARS]
 
 
 @router.post("/handoff", response_model=VoiceHandoffResponse)
@@ -95,6 +117,7 @@ async def handoff_to_phone(req: VoiceHandoffRequest, request: Request):
         )
 
     if response.status_code >= 400:
+        logger.warning("[VAPI] call failed status=%s message=%s", response.status_code, _vapi_error_message(response))
         # VAPI rejected it, so no call exists. Release the claim so the patient can retry.
         update_session(session.session_id, {"voice_call_started": False})
         raise HTTPException(

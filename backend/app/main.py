@@ -6,6 +6,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.config import settings
+from app.core.access_log import skip_paths_in_access_log
 from app.core.limiter import limiter
 from app.services.session_service import SessionExpired
 from app.routes.health import router as health_router
@@ -54,6 +55,7 @@ app.add_middleware(
 
 # Fly's check and the browser warm-up hit this every few seconds; keep it out of the logs.
 LOG_SKIP_PATHS = {f"{settings.api_v1_prefix}/health"}
+skip_paths_in_access_log(LOG_SKIP_PATHS)  # uvicorn's own access log too
 
 
 @app.middleware("http")

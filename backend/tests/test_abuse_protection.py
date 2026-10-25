@@ -82,6 +82,7 @@ class FakeVapi:
     calls: list = []
     status = 200
     raises = None
+    body = None
 
     def __init__(self, *a, **kw):
         pass
@@ -97,13 +98,14 @@ class FakeVapi:
         if FakeVapi.raises:
             raise FakeVapi.raises
         status = FakeVapi.status
+        body = FakeVapi.body
 
         class R:
             status_code = status
             text = "upstream secret detail"
 
             def json(self_inner):
-                return {"id": "call_123"}
+                return body if body is not None else {"id": "call_123"}
 
         return R()
 
@@ -113,6 +115,7 @@ def vapi(monkeypatch):
     FakeVapi.calls = []
     FakeVapi.status = 200
     FakeVapi.raises = None
+    FakeVapi.body = None
     monkeypatch.setattr("app.routes.voice.httpx.AsyncClient", FakeVapi)
     monkeypatch.setattr(settings, "vapi_api_key", "k")
     monkeypatch.setattr(settings, "vapi_phone_number_id", "p")
@@ -178,6 +181,76 @@ def test_handoff_claim_kept_when_outcome_is_unknown(vapi):
     vapi.raises = None
     assert _handoff(sid, 2).status_code == 409  # might have rung already; never risk a second call
     assert len(vapi.calls) == 1
+
+
+# --- VAPI failure logging ----------------------------------------------------
+
+
+def _failed_handoff(vapi, caplog, body, status=400):
+    sid = _session_with_phone("2125559876")
+    vapi.status = status
+    vapi.body = body
+    with caplog.at_level("WARNING", logger="elara.voice"):
+        r = _handoff(sid, 1)
+    return r, [rec.getMessage() for rec in caplog.records if rec.name == "elara.voice"]
+
+
+def test_vapi_failure_logs_one_line_with_status_and_message(vapi, caplog):
+    r, lines = _failed_handoff(vapi, caplog, {"message": "Couldn't find phone number", "statusCode": 400})
+    assert lines == ["[VAPI] call failed status=400 message=Couldn't find phone number"]
+    # Browser response is unchanged.
+    assert r.status_code == 502
+    assert r.json() == {"detail": "The phone service couldn't start the call right now. Please try again in a moment."}
+
+
+def test_vapi_failure_message_list_is_joined(vapi, caplog):
+    _, lines = _failed_handoff(vapi, caplog, {"message": ["customer.number must be E.164", "assistant is invalid"]})
+    assert lines == ["[VAPI] call failed status=400 message=customer.number must be E.164; assistant is invalid"]
+
+
+def test_vapi_failure_message_truncated_to_500(vapi, caplog):
+    _, lines = _failed_handoff(vapi, caplog, {"message": "x" * 900})
+    assert lines == ["[VAPI] call failed status=400 message=" + "x" * 500]
+
+
+def test_vapi_failure_without_message_still_logs(vapi, caplog):
+    _, lines = _failed_handoff(vapi, caplog, {"error": "Bad Request"}, status=401)
+    assert lines == ["[VAPI] call failed status=401 message=(no message)"]
+
+
+def test_vapi_failure_log_never_contains_sensitive_data(vapi, caplog):
+    _, lines = _failed_handoff(vapi, caplog, {"message": "nope"})
+    text = " ".join(lines) + caplog.text
+    for secret in ("2125559876", "+12125559876", "s3cret", "phone_number", "Bearer"):
+        assert secret not in text
+
+
+# --- uvicorn access log ------------------------------------------------------
+
+
+def test_access_log_filter_skips_health_only():
+    import logging
+
+    from app.core.access_log import SkipPathsFilter
+
+    f = SkipPathsFilter({"/api/v1/health"})
+
+    def rec(path):
+        return logging.LogRecord(
+            "uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', ("1.2.3.4:5", "GET", path, "1.1", 200), None
+        )
+
+    assert f.filter(rec("/api/v1/health")) is False
+    assert f.filter(rec("/api/v1/health?x=1")) is False
+    assert f.filter(rec("/api/v1/chat")) is True
+
+
+def test_access_log_filter_is_installed_on_uvicorn():
+    import logging
+
+    from app.core.access_log import SkipPathsFilter
+
+    assert any(isinstance(f, SkipPathsFilter) for f in logging.getLogger("uvicorn.access").filters)
 
 
 @pytest.mark.parametrize(

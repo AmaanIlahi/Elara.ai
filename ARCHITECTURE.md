@@ -273,4 +273,4 @@ Rate limiting reads `Fly-Client-IP`, so the process command does not need `--pro
 
 ### 5.4 Observability that exists
 
-One startup line (`[STARTUP] … llm_configured=… vapi_configured=…`, booleans only), `REQUEST:`/`RESPONSE:` lines per request (health excluded), and `elara.llm` logger warnings/exceptions for Gemini timeouts and failures. A number of bare `print()` calls remain in `chat.py`. No structured logs, request IDs, metrics or tracing.
+One startup line (`[STARTUP] … llm_configured=… vapi_configured=…`, booleans only), `REQUEST:`/`RESPONSE:` lines per request, and `elara.llm` logger warnings/exceptions for Gemini timeouts and failures. Health is excluded from both those lines and uvicorn's access log (`app/core/access_log.py`). When VAPI rejects `POST /call`, one `elara.voice` line is logged, `[VAPI] call failed status=<code> message=<VAPI's "message", max 500 chars>`; the payload, phone number, `collected_data` and API key are never logged. A number of bare `print()` calls remain in `chat.py`. No structured logs, request IDs, metrics or tracing.
