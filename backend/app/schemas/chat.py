@@ -2,8 +2,11 @@ from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 
 
+MAX_MESSAGE_LENGTH = 1000
+
+
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(max_length=MAX_MESSAGE_LENGTH)
     session_id: Optional[str] = None
     phone_number: Optional[str] = None
 

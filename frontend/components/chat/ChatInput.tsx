@@ -38,6 +38,7 @@ export default function ChatInput({ onSend, disabled = false }: Props) {
           }}
           placeholder={disabled ? "Elara is typing..." : "Type your message..."}
           disabled={disabled}
+          maxLength={1000}
           className="flex-1 rounded-xl border border-white/40 bg-white/70 px-4 py-3 text-sm text-slate-800 outline-none backdrop-blur-md placeholder:text-slate-400 focus:border-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
         />
 

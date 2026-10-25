@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from app.data.provider_data import BOOKED_SLOTS, PROVIDERS, is_slot_booked
 from app.main import app
 from app.services.scheduling_service import confirm_booking_from_session_data
-from app.services.session_service import create_session, update_session
+from app.services.session_service import create_session, get_session, update_session
 
 client = TestClient(app)
 PROVIDER = PROVIDERS[0]
@@ -83,4 +83,4 @@ def test_chat_endpoint_second_patient_gets_conflict_and_quick_replies():
     assert body["metadata"].get("booking_confirmed") is None
     assert body["quick_replies"], "remaining slots should come back as quick replies"
     # and the loser is not marked completed
-    assert client.get(f"/api/v1/session/{second}").json()["status"] == "in_progress"
+    assert get_session(second).status == "in_progress"

@@ -1,9 +1,6 @@
 import asyncio
-import json
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from typing import AsyncGenerator, Optional
-
+from fastapi import APIRouter, Request
+from typing import Optional
 
 from app.core.limiter import limiter
 from app.schemas.chat import ChatRequest, ChatResponse, QuickReply
@@ -1303,29 +1300,3 @@ async def handle_chat(body: ChatRequest, request: Request):
         metadata=metadata,
         quick_replies=_build_quick_replies(updated_session.state, metadata),
     )
-
-
-async def _stream_tokens(text: str) -> AsyncGenerator[str, None]:
-    """Yield each word as an SSE data event, simulating token streaming."""
-    words = text.split(" ")
-    for i, word in enumerate(words):
-        chunk = word if i == 0 else " " + word
-        yield f"data: {json.dumps({'token': chunk})}\n\n"
-        await asyncio.sleep(0.03)
-
-
-@router.post("/chat/stream")
-@limiter.limit("20/minute")
-async def handle_chat_stream(body: ChatRequest, request: Request):
-    """SSE streaming variant of /chat.
-    Calls handle_chat internally and streams the final message word-by-word,
-    then sends a final 'done' event with the full ChatResponse payload."""
-    response: ChatResponse = await handle_chat(body, request)
-
-    async def event_stream() -> AsyncGenerator[str, None]:
-        async for token_event in _stream_tokens(response.message):
-            yield token_event
-        payload = response.model_dump()
-        yield f"data: {json.dumps({'done': True, 'response': payload})}\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")

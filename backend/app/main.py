@@ -9,12 +9,8 @@ from app.core.config import settings
 from app.core.limiter import limiter
 from app.services.session_service import SessionExpired
 from app.routes.health import router as health_router
-from app.routes.session import router as session_router
 from app.routes.chat import router as chat_router
 from app.routes.practice import router as practice_router
-from app.routes.scheduling import router as scheduling_router
-from app.routes.booking import router as booking_router
-from app.routes.refill import router as refill_router
 from app.routes.voice import router as voice_router
 from app.routes.appointments import router as appointments_router
 
@@ -77,12 +73,8 @@ def root():
 
 
 app.include_router(health_router, prefix=settings.api_v1_prefix)
-app.include_router(session_router, prefix=settings.api_v1_prefix)
 app.include_router(chat_router, prefix=settings.api_v1_prefix)
 app.include_router(practice_router, prefix=settings.api_v1_prefix)
-app.include_router(scheduling_router, prefix=settings.api_v1_prefix)
-app.include_router(booking_router, prefix=settings.api_v1_prefix)
-app.include_router(refill_router, prefix=settings.api_v1_prefix)
 app.include_router(voice_router, prefix=settings.api_v1_prefix)
 app.include_router(appointments_router, prefix=settings.api_v1_prefix)
 
