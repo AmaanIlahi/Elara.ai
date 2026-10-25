@@ -14,10 +14,6 @@ from app.routes.practice import router as practice_router
 from app.routes.voice import router as voice_router
 from app.routes.appointments import router as appointments_router
 
-# print("MAIN FILE LOADED", flush=True)
-# print("EMAIL ROUTER IMPORTED:", email_router, flush=True)
-# print("EMAIL ROUTER ROUTES COUNT:", len(email_router.routes), flush=True)
-
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
@@ -56,8 +52,15 @@ app.add_middleware(
 )
 
 
+# Fly's check and the browser warm-up hit this every few seconds; keep it out of the logs.
+LOG_SKIP_PATHS = {f"{settings.api_v1_prefix}/health"}
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    if request.url.path in LOG_SKIP_PATHS:
+        return await call_next(request)
+
     print(f"REQUEST: {request.method} {request.url.path}", flush=True)
     response = await call_next(request)
     print(f"RESPONSE: {response.status_code} {request.url.path}", flush=True)
@@ -77,11 +80,3 @@ app.include_router(chat_router, prefix=settings.api_v1_prefix)
 app.include_router(practice_router, prefix=settings.api_v1_prefix)
 app.include_router(voice_router, prefix=settings.api_v1_prefix)
 app.include_router(appointments_router, prefix=settings.api_v1_prefix)
-
-# print("=== REGISTERED ROUTES ===", flush=True)
-# for route in app.routes:
-#     methods = getattr(route, "methods", None)
-#     path = getattr(route, "path", None)
-#     name = getattr(route, "name", None)
-#     print(f"{methods} {path} -> {name}", flush=True)
-# print("=== END ROUTES ===", flush=True)

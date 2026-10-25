@@ -15,7 +15,7 @@ Built in 4 days.
 - **Mid-Flow Q&A** — Ask "what should I bring?" while booking and get a real answer, not "invalid input"
 - **Post-Booking Guidance** — Personalized prep tips based on specialty and body part
 - **Voice Handoff** — One click to continue the conversation as a phone call, full context preserved
-- **Email Confirmations** — Sent from a custom domain via Resend
+- **Add to calendar (.ics)** — One click on the booking card downloads a standard calendar file (America/New_York, clinic address included); no email service involved
 - **Prescription Refills** — Guided medication and pharmacy collection
 - **Practice Info** — Hours, address, contact details
 - **Safety** — No medical advice, no diagnosis, validated inputs, graceful degradation
@@ -30,9 +30,8 @@ flowchart LR
     B -->|"HTTPS + CORS<br/>/api/v1/*"| F[Fly.io<br/>FastAPI]
     F --> G[Gemini 2.5 Flash Lite]
     F -->|outbound call| VP[VAPI]
-    VP -->|tool webhook| F
+    VP -->|"tool webhook<br/>X-Vapi-Secret"| F
     VP --> O[OpenAI gpt-4.1<br/>voice model]
-    F --> R[Resend]
 ```
 
 The browser talks to the FastAPI backend on Fly.io **directly over HTTPS**; there is no proxy hop. The backend allows the Vercel origins through CORS (`backend/app/main.py`), and the frontend reads the backend URL from `NEXT_PUBLIC_API_BASE_URL` at build time.
@@ -50,7 +49,7 @@ Session state currently lives in backend memory, so it is cleared whenever the F
 | LLM | Google Gemini 2.5 Flash Lite |
 | Hosting | Docker on Fly.io (`backend/fly.toml`, HTTPS terminated by Fly) |
 | Voice | VAPI (call model: OpenAI `gpt-4.1`, configured in `voice_prompt.py`) |
-| Email | Resend + custom domain |
+| Calendar | `.ics` built with the Python standard library |
 | Deploy | Vercel (frontend), `fly deploy` (backend) |
 
 ---
@@ -93,7 +92,7 @@ cp .env.example .env        # then fill in values; see the comments in the file
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
-All configuration comes from environment variables listed in [`backend/.env.example`](./backend/.env.example) (Gemini, VAPI, Resend, public URLs). Without keys the app still runs, using keyword fallbacks and skipping voice and email.
+All configuration comes from environment variables listed in [`backend/.env.example`](./backend/.env.example) (Gemini, VAPI, public URL). Without keys the app still runs, using keyword fallbacks and without voice handoff.
 
 **Frontend**
 ```bash
@@ -111,8 +110,21 @@ pytest
 
 ## Deploying
 
-- **Backend:** `cd backend && fly deploy`. Set secrets with `fly secrets set GEMINI_API_KEY=... LLM_ENABLED=true VAPI_API_KEY=... VAPI_PHONE_NUMBER_ID=... RESEND_API_KEY=... PUBLIC_BACKEND_BASE_URL=https://backend-purple-pine-3154.fly.dev`. Never commit secret values.
+- **Backend:** `cd backend && fly deploy`. Set secrets with `fly secrets set GEMINI_API_KEY=... LLM_ENABLED=true VAPI_API_KEY=... VAPI_PHONE_NUMBER_ID=... VAPI_WEBHOOK_SECRET=... PUBLIC_BACKEND_BASE_URL=https://backend-purple-pine-3154.fly.dev`. Never commit secret values.
 - **Frontend:** Vercel, with `NEXT_PUBLIC_API_BASE_URL=https://backend-purple-pine-3154.fly.dev` set for each environment. It is read at build time, so redeploy after changing it.
+
+---
+
+## Limits and Security
+
+| Control | Behaviour |
+|---------|-----------|
+| Rate limits | One shared limiter keyed on the `Fly-Client-IP` header (falls back to the socket address locally). `POST /api/v1/chat`: **20 per minute** per client. `POST /api/v1/voice/handoff`: **3 per hour** per client. Every other endpoint: 60 per minute. `/health` and the VAPI webhook are exempt. Counters live in process memory. Over the limit returns `429`. |
+| Voice handoff | At most **one call per session**; the phone number must be a 10-digit US number before `+1` is added. |
+| VAPI webhook | `POST /api/v1/voice/webhook` requires the header `X-Vapi-Secret` to equal `VAPI_WEBHOOK_SECRET`; otherwise `401`. With no secret configured, every webhook call is rejected and the handoff endpoint refuses to start a call. The secret is attached to the assistant and to each tool's server block when the call is created, so there is nothing to configure in the VAPI dashboard. Generate one with `openssl rand -hex 32`. |
+| Input | Chat messages are limited to 1000 characters. Dates of birth are read as US `MM/DD/YYYY`; future dates and ages over 120 are rejected. |
+| Irreversible steps | Booking and refill submission proceed only on a clear "yes". Anything ambiguous ("not sure", "no thanks") is asked again. |
+| PHI surface | The frontend uses only `/chat`, `/voice/handoff`, `/health` and the calendar download; endpoints that returned whole sessions were removed. |
 
 ---
 

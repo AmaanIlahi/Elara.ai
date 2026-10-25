@@ -7,7 +7,6 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = False
 
-    frontend_origin: str = "http://localhost:3000"
     api_v1_prefix: str = "/api/v1"
 
     llm_provider: str = "gemini"
@@ -21,7 +20,6 @@ class Settings(BaseSettings):
     # Shared secret VAPI sends back in the X-Vapi-Secret header on every webhook call.
     vapi_webhook_secret: Optional[str] = None
     public_backend_base_url: str = "http://localhost:8000"
-    public_frontend_base_url: str = "http://localhost:3000"
     vapi_assistant_name: str = "Elara Voice Scheduler"
 
     model_config = SettingsConfigDict(
