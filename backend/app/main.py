@@ -1,14 +1,13 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.core.config import settings
+from app.core.limiter import limiter
 from app.services.session_service import SessionExpired
-
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 from app.routes.health import router as health_router
 from app.routes.session import router as session_router
 from app.routes.chat import router as chat_router
@@ -36,6 +35,9 @@ print(settings.startup_summary(), flush=True)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Applies the default limit to every route without its own. Added before CORS so
+# CORS stays outermost and 429 responses still carry the CORS headers.
+app.add_middleware(SlowAPIMiddleware)
 
 
 @app.exception_handler(SessionExpired)

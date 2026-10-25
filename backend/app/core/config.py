@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     vapi_api_key: Optional[str] = None
     vapi_phone_number_id: Optional[str] = None
+    # Shared secret VAPI sends back in the X-Vapi-Secret header on every webhook call.
+    vapi_webhook_secret: Optional[str] = None
     public_backend_base_url: str = "http://localhost:8000"
     public_frontend_base_url: str = "http://localhost:3000"
     vapi_assistant_name: str = "Elara Voice Scheduler"
@@ -32,7 +34,7 @@ class Settings(BaseSettings):
     def startup_summary(self) -> str:
         """One line saying which integrations are configured. Booleans only, never values."""
         llm = bool(self.llm_enabled and self.llm_provider == "gemini" and self.gemini_api_key)
-        vapi = bool(self.vapi_api_key and self.vapi_phone_number_id)
+        vapi = bool(self.vapi_api_key and self.vapi_phone_number_id and self.vapi_webhook_secret)
         return (
             f"[STARTUP] {self.app_name} v{self.app_version} "
             f"debug={self.debug} llm_configured={llm} vapi_configured={vapi}"

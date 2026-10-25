@@ -88,6 +88,21 @@ def validate_phone(value: str) -> bool:
     return len(digits) == 10
 
 
+def normalize_us_phone(value: Optional[str]) -> Optional[str]:
+    """Return the 10-digit US number (NANP: area code and exchange start 2-9), else None.
+
+    Only spaces, dashes, dots and parentheses are tolerated as formatting.
+    Anything else (letters, a '+', extra digits) is rejected, so the result is
+    always safe to prefix with '+1'.
+    """
+    if not value:
+        return None
+    compact = re.sub(r"[\s().-]", "", value)
+    if re.fullmatch(r"[2-9]\d{2}[2-9]\d{6}", compact):
+        return compact
+    return None
+
+
 def validate_email(value: str) -> bool:
     return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value) is not None
 

@@ -2,12 +2,10 @@ import asyncio
 import json
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from typing import AsyncGenerator, Optional
 
-limiter = Limiter(key_func=get_remote_address)
 
+from app.core.limiter import limiter
 from app.schemas.chat import ChatRequest, ChatResponse, QuickReply
 from app.services.chat_service import detect_workflow, get_workflow_response, get_services_overview
 from app.services.intake_service import (

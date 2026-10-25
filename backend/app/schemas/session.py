@@ -16,5 +16,7 @@ class Session(BaseModel):
     collected_data: Dict[str, Any] = Field(default_factory=dict)
     last_message: Optional[str] = None
     status: str = "in_progress"
+    # Set once an outbound VAPI call has been requested for this session (max one).
+    voice_call_started: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

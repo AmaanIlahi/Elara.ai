@@ -153,6 +153,11 @@ export function getFriendlyErrorMessage(error: unknown): string {
       return "I'm having trouble reaching the assistant right now. Please check your connection and try again in a moment.";
     }
     const status = error.status ?? 0;
+    // The backend's own 502 (voice provider failure) carries a patient-safe message;
+    // Fly's proxy 502/503 pages are not JSON, so they have no detail and fall through.
+    if (status === 502 && typeof error.detail === "string" && error.detail) {
+      return error.detail;
+    }
     if (status === 502 || status === 503 || status === 504) {
       return "The assistant is still starting up. Please try again in a few seconds.";
     }
