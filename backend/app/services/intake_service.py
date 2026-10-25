@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional, Tuple
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 
 REQUIRED_INTAKE_FIELDS = [
@@ -70,17 +70,23 @@ def build_intake_prompt(missing_field: str) -> str:
     return FIELD_PROMPTS[missing_field]
 
 
-def validate_dob(value: str) -> bool:
+MAX_AGE_YEARS = 120
+
+
+def validate_dob(value: str, today: Optional[date] = None) -> bool:
+    """YYYY-MM-DD, a real calendar date, not in the future, and not more than 120 years ago."""
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
         return False
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%d")
-        # Reject future dates and unreasonably old dates
-        if parsed > datetime.now() or parsed.year < 1900:
-            return False
-        return True
+        dob = datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
         return False
+
+    today = today or date.today()
+    if dob > today:
+        return False
+    age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+    return age <= MAX_AGE_YEARS
 
 
 def validate_phone(value: str) -> bool:
@@ -160,17 +166,19 @@ def normalize_dob(value: str) -> Optional[str]:
         except ValueError:
             return None
 
-    # Try slash or dash numeric formats
+    # Numeric formats are US order (MM/DD/YYYY) first, so 03/04/1990 is March 4.
+    # Day-first is only a fallback for values the US order cannot represent
+    # (e.g. 25/12/1990), where there is no ambiguity.
     numeric_patterns = [
-        ("%d/%m/%Y", normalized),
-        ("%m/%d/%Y", normalized),
-        ("%d-%m-%Y", normalized),
-        ("%m-%d-%Y", normalized),
+        "%m/%d/%Y",
+        "%d/%m/%Y",
+        "%m-%d-%Y",
+        "%d-%m-%Y",
     ]
 
-    for fmt, candidate in numeric_patterns:
+    for fmt in numeric_patterns:
         try:
-            parsed = datetime.strptime(candidate, fmt)
+            parsed = datetime.strptime(normalized, fmt)
             return parsed.strftime("%Y-%m-%d")
         except ValueError:
             continue

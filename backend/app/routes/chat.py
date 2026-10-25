@@ -4,6 +4,7 @@ from typing import Optional
 
 from app.core.limiter import limiter
 from app.schemas.chat import ChatRequest, ChatResponse, QuickReply
+from app.services.confirmation import classify_reply
 from app.services.chat_service import detect_workflow, get_workflow_response, get_services_overview
 from app.services.intake_service import (
     build_intake_prompt,
@@ -632,9 +633,10 @@ async def handle_chat(body: ChatRequest, request: Request):
 
     elif workflow_type == "scheduling":
         if session.state == "SCHEDULING_CONFIRMING":
-            msg_lower = request.message.lower().strip()
-            confirmed = any(w in msg_lower for w in ["yes", "yeah", "confirm", "go ahead", "sure", "ok", "correct", "book", "please"])
-            declined = any(w in msg_lower for w in ["no", "nope", "cancel", "change", "different", "back", "another"])
+            # Whole-word reading; anything unclear is neither, so it falls through to the re-ask below.
+            reply_kind = classify_reply(request.message)
+            confirmed = reply_kind == "yes"
+            declined = reply_kind == "no"
 
             if confirmed:
                 pending_slot_choice = session.collected_data.get("pending_slot_choice")
@@ -1087,9 +1089,9 @@ async def handle_chat(body: ChatRequest, request: Request):
 
     elif workflow_type == "refill":
         if session.state == "REFILL_CONFIRMING":
-            msg_lower = request.message.lower().strip()
-            confirmed = any(w in msg_lower for w in ["yes", "yeah", "confirm", "go ahead", "sure", "ok", "submit", "please", "correct"])
-            declined = any(w in msg_lower for w in ["no", "nope", "cancel", "change", "different", "back", "update"])
+            reply_kind = classify_reply(request.message)
+            confirmed = reply_kind == "yes"
+            declined = reply_kind == "no"
 
             med_name = session.collected_data.get("medication_name", "")
             pharm_name = session.collected_data.get("pharmacy_name", "")

@@ -293,7 +293,7 @@ You are extracting patient intake information from a conversational message.
 Extract any of these fields if present in the user's message:
 - first_name: the patient's first/given name
 - last_name: the patient's last/family name
-- dob: date of birth in YYYY-MM-DD format (convert from any format the user provides)
+- dob: date of birth in YYYY-MM-DD format (convert from any format the user provides; numeric dates with slashes or dashes are US order MM/DD/YYYY, so 03/04/1990 is 1990-03-04)
 - phone_number: 10-digit US phone number (digits only, no dashes or spaces)
 - email: email address
 
